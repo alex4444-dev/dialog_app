@@ -1,0 +1,12 @@
+PyQt5==5.15.7
+pygame==2.1.2
+opencv-python==4.6.0.66
+numpy==1.23.1
+pyaudio==0.2.11
+cryptography==38.0.1
+threading
+socket
+
+# Для TURN-клиента
+aiohttp==3.8.4
+aiortc==1.5.0
