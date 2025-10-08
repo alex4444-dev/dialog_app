@@ -249,8 +249,10 @@ class SecureNetworkClient:
             
             # Обработка асинхронных сообщений
             if message_type == 'p2p_message':
-                from_user = message.get('from')
-                text = message.get('message')
+                # Поддержка разных форматов полей от сервера
+                from_user = message.get('from') or message.get('from_user') or message.get('sender')
+                text = message.get('message') or message.get('text') or message.get('content')
+                
                 if from_user and text:
                     self.logger.info(f"!!! ВХОДЯЩЕЕ P2P СООБЩЕНИЕ от {from_user}: {text}")
                     if self.message_handler:
