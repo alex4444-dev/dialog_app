@@ -6,6 +6,7 @@ import time
 import hashlib
 import queue
 import uuid
+import struct
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.fernet import Fernet
@@ -36,6 +37,7 @@ class SecureNetworkClient:
         self.message_queue = queue.Queue()
         self.message_handler = None
         self.status_handler = None
+        self.call_handler = None
         
         # Флаги управления потоками
         self.stop_listener = False
@@ -46,6 +48,12 @@ class SecureNetworkClient:
         self.pending_response = None
         self.response_event = threading.Event()
         self.expected_response_type = None
+        
+        # Для звонков
+        self.call_sockets = {}
+        self.call_ports = {}
+        self.active_call = None
+        self.call_threads = {}
         
         # Настройка логирования
         logging.basicConfig(
@@ -63,6 +71,11 @@ class SecureNetworkClient:
         """Установка обработчика статусов сообщений"""
         self.logger.info(f"Установлен обработчик статусов: {handler}")
         self.status_handler = handler
+
+    def set_call_handler(self, handler):
+        """Установка обработчика звонков"""
+        self.logger.info(f"Установлен обработчик звонков: {handler}")
+        self.call_handler = handler
 
     def connect(self, host=None, port=None):
         """Подключение к серверу"""
@@ -295,6 +308,51 @@ class SecureNetworkClient:
                 self.logger.error(f"Ошибка от сервера: {error_msg}")
                 if self.status_handler:
                     self.status_handler('error', error_msg)
+            
+            # Обработка сообщений о звонках
+            elif message_type == 'call_request':
+                from_user = message.get('from')
+                call_type = message.get('call_type', 'audio')
+                call_id = message.get('call_id')
+                
+                self.logger.info(f"Входящий звонок от {from_user}, тип: {call_type}")
+                if self.call_handler:
+                    self.call_handler('incoming_call', from_user, call_type, call_id)
+                    
+            elif message_type == 'call_accepted':
+                from_user = message.get('from')
+                call_id = message.get('call_id')
+                call_port = message.get('call_port')
+                
+                self.logger.info(f"Звонок принят пользователем {from_user}")
+                if self.call_handler:
+                    self.call_handler('call_accepted', from_user, call_id, call_port)
+                    
+            elif message_type == 'call_rejected':
+                from_user = message.get('from')
+                call_id = message.get('call_id')
+                
+                self.logger.info(f"Звонок отклонен пользователем {from_user}")
+                if self.call_handler:
+                    self.call_handler('call_rejected', from_user, call_id)
+                    
+            elif message_type == 'call_ended':
+                from_user = message.get('from')
+                call_id = message.get('call_id')
+                
+                self.logger.info(f"Звонок завершен пользователем {from_user}")
+                if self.call_handler:
+                    self.call_handler('call_ended', from_user, call_id)
+                    
+            elif message_type == 'call_info':
+                from_user = message.get('from')
+                call_id = message.get('call_id')
+                call_port = message.get('call_port')
+                
+                self.logger.info(f"Информация о звонке от {from_user}, порт: {call_port}")
+                if self.call_handler:
+                    self.call_handler('call_info', from_user, call_id, call_port)
+                    
             else:
                 self.logger.warning(f"Неизвестный тип сообщения: {message_type}")
                     
@@ -413,6 +471,144 @@ class SecureNetworkClient:
             self.logger.error(f"Ошибка отправки P2P сообщения: {e}")
             return False
 
+    # Методы для звонков
+    def send_call_request(self, to_username, call_type='audio'):
+        """Отправка запроса на звонок"""
+        try:
+            if not self.connected:
+                self.logger.error("Нет подключения к серверу")
+                return False
+
+            call_id = str(uuid.uuid4())
+                
+            call_data = {
+                'type': 'call_request',
+                'to': to_username,
+                'call_type': call_type,
+                'call_id': call_id,
+                'from': self.username
+            }
+            
+            # Добавляем session_token для аутентификации
+            if self.session_token:
+                call_data['session_token'] = self.session_token
+                
+            self.logger.info(f"Отправка запроса на звонок пользователю {to_username}, тип: {call_type}")
+            success = self.send_encrypted_message(call_data)
+            
+            if success:
+                self.logger.info(f"Запрос на звонок успешно отправлен")
+                return call_id
+            else:
+                self.logger.error(f"Не удалось отправить запрос на звонок")
+                return None
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки запроса на звонок: {e}")
+            return None
+
+    def send_call_response(self, to_username, call_id, accepted=True, call_port=None):
+        """Отправка ответа на звонок"""
+        try:
+            if not self.connected:
+                self.logger.error("Нет подключения к серверу")
+                return False
+
+            response_type = 'call_accepted' if accepted else 'call_rejected'
+                
+            response_data = {
+                'type': response_type,
+                'to': to_username,
+                'call_id': call_id,
+                'from': self.username
+            }
+            
+            if accepted and call_port is not None:
+                response_data['call_port'] = call_port
+            
+            # Добавляем session_token для аутентификации
+            if self.session_token:
+                response_data['session_token'] = self.session_token
+                
+            self.logger.info(f"Отправка ответа на звонок пользователю {to_username}: {response_type}")
+            success = self.send_encrypted_message(response_data)
+            
+            if success:
+                self.logger.info(f"Ответ на звонок успешно отправлен")
+                return True
+            else:
+                self.logger.error(f"Не удалось отправить ответ на звонок")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки ответа на звонок: {e}")
+            return False
+
+    def send_call_end(self, to_username, call_id):
+        """Отправка сообщения о завершении звонка"""
+        try:
+            if not self.connected:
+                self.logger.error("Нет подключения к серверу")
+                return False
+
+            end_data = {
+                'type': 'call_ended',
+                'to': to_username,
+                'call_id': call_id,
+                'from': self.username
+            }
+            
+            # Добавляем session_token для аутентификации
+            if self.session_token:
+                end_data['session_token'] = self.session_token
+                
+            self.logger.info(f"Отправка сообщения о завершении звонка пользователю {to_username}")
+            success = self.send_encrypted_message(end_data)
+            
+            if success:
+                self.logger.info(f"Сообщение о завершении звонка успешно отправлено")
+                return True
+            else:
+                self.logger.error(f"Не удалось отправить сообщение о завершении звонка")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки сообщения о завершении звонка: {e}")
+            return False
+
+    def send_call_info(self, to_username, call_id, call_port):
+        """Отправка информации о звонке (порт для подключения)"""
+        try:
+            if not self.connected:
+                self.logger.error("Нет подключения к серверу")
+                return False
+
+            info_data = {
+                'type': 'call_info',
+                'to': to_username,
+                'call_id': call_id,
+                'call_port': call_port,
+                'from': self.username
+            }
+            
+            # Добавляем session_token для аутентификации
+            if self.session_token:
+                info_data['session_token'] = self.session_token
+                
+            self.logger.info(f"Отправка информации о звонке пользователю {to_username}, порт: {call_port}")
+            success = self.send_encrypted_message(info_data)
+            
+            if success:
+                self.logger.info(f"Информация о звонке успешно отправлена")
+                return True
+            else:
+                self.logger.error(f"Не удалось отправить информацию о звонке")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки информации о звонке: {e}")
+            return False
+
     def register(self, username, password, email=""):
         """Регистрация нового пользователя"""
         self.logger.info(f"Регистрация пользователя {username}")
@@ -497,6 +693,11 @@ class SecureNetworkClient:
         try:
             self.connected = False
             self.stop_listener = True
+            
+            # Закрываем все звонки
+            for call_id in list(self.call_threads.keys()):
+                self.stop_call(call_id)
+                
             if self.listener_thread and self.listener_thread.is_alive():
                 self.listener_thread.join(timeout=2.0)
             if self.server_socket:
@@ -535,6 +736,121 @@ class SecureNetworkClient:
         # Запускаем первый heartbeat
         if self.connected and not self.stop_listener:
             threading.Timer(30.0, send_heartbeat).start()
+
+    # Методы для работы с медиа-звонками
+    def start_call_server(self, call_id, port=0):
+        """Запуск сервера для приема медиа-данных"""
+        try:
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            call_socket.bind(('0.0.0.0', port))
+            call_socket.listen(1)
+            
+            actual_port = call_socket.getsockname()[1]
+            self.call_sockets[call_id] = call_socket
+            self.call_ports[call_id] = actual_port
+            
+            self.logger.info(f"Сервер звонка {call_id} запущен на порту {actual_port}")
+            return actual_port
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка запуска сервера звонка: {e}")
+            return None
+
+    def connect_to_call(self, call_id, host, port):
+        """Подключение к медиа-серверу другого пользователя"""
+        try:
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.connect((host, port))
+            self.call_sockets[call_id] = call_socket
+            
+            self.logger.info(f"Подключение к звонку {call_id} на {host}:{port} установлено")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка подключения к звонку: {e}")
+            return False
+
+    def send_media_data(self, call_id, data_type, data):
+        """Отправка медиа-данных через звонок"""
+        try:
+            if call_id not in self.call_sockets:
+                self.logger.error(f"Звонок {call_id} не активен")
+                return False
+                
+            call_socket = self.call_sockets[call_id]
+            
+            # Формируем заголовок: тип данных (1 байт) + длина данных (4 байта)
+            header = struct.pack('BI', ord(data_type), len(data))
+            message = header + data
+            
+            call_socket.sendall(message)
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки медиа-данных: {e}")
+            return False
+
+    def receive_media_data(self, call_id, callback):
+        """Прием медиа-данных через звонок"""
+        def receive_thread():
+            try:
+                if call_id not in self.call_sockets:
+                    return
+                    
+                call_socket = self.call_sockets[call_id]
+                
+                while call_id in self.call_sockets:
+                    # Читаем заголовок
+                    header = call_socket.recv(5)
+                    if not header:
+                        break
+                        
+                    data_type_char, data_length = struct.unpack('BI', header)
+                    data_type = chr(data_type_char)
+                    
+                    # Читаем данные
+                    data = b''
+                    while len(data) < data_length:
+                        chunk = call_socket.recv(data_length - len(data))
+                        if not chunk:
+                            break
+                        data += chunk
+                    
+                    if len(data) == data_length:
+                        callback(data_type, data)
+                    else:
+                        self.logger.error("Неполные данные получены")
+                        break
+                        
+            except Exception as e:
+                self.logger.error(f"Ошибка приема медиа-данных: {e}")
+            finally:
+                self.logger.info(f"Поток приема медиа-данных для звонка {call_id} завершен")
+        
+        thread = threading.Thread(target=receive_thread, daemon=True)
+        self.call_threads[call_id] = thread
+        thread.start()
+
+    def stop_call(self, call_id):
+        """Остановка звонка и очистка ресурсов"""
+        try:
+            if call_id in self.call_sockets:
+                self.call_sockets[call_id].close()
+                del self.call_sockets[call_id]
+                
+            if call_id in self.call_ports:
+                del self.call_ports[call_id]
+                
+            if call_id in self.call_threads:
+                if self.call_threads[call_id].is_alive():
+                    self.call_threads[call_id].join(timeout=1.0)
+                del self.call_threads[call_id]
+                
+            self.logger.info(f"Звонок {call_id} остановлен")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка остановки звонка: {e}")
 
 if __name__ == "__main__":
     client = SecureNetworkClient()
