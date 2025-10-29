@@ -54,6 +54,9 @@ class SecureNetworkClient:
         self.call_ports = {}
         self.active_call = None
         self.call_threads = {}
+        self.audio_available = False
+        self.audio_system = "Unknown"
+        self.clients_info = {} # Для хранения информации о других клиентах
         
         # Настройка логирования
         logging.basicConfig(
@@ -76,6 +79,29 @@ class SecureNetworkClient:
         """Установка обработчика звонков"""
         self.logger.info(f"Установлен обработчик звонков: {handler}")
         self.call_handler = handler
+
+    def handle_call_accepted(self, from_user, call_id, call_port):
+        """Обработка принятия звонка другим пользователем"""
+        self.logger.info(f"Звонок принят пользователем {from_user}")
+    
+        if call_id in self.active_calls:
+            call_info = self.active_calls[call_id]
+            call_window = call_info['window']
+        
+            # ✅ СОХРАНЯЕМ ИНФОРМАЦИЮ О ПОЛЬЗОВАТЕЛЕ
+            if from_user not in self.clients_info:
+                self.clients_info[from_user] = {}
+        
+            if call_port:
+                self.clients_info[from_user]['call_port'] = call_port
+        
+            # Запускаем звонок в UI
+            call_window.start_call()
+        
+            self.system_chat.append(f"✅ Пользователь {from_user} принял звонок")
+        
+        else:
+            self.logger.warning(f"Звонок {call_id} не найден в активных звонках")
 
     def connect(self, host=None, port=None):
         """Подключение к серверу"""
@@ -248,7 +274,6 @@ class SecureNetworkClient:
             
             message_type = message.get('type')
             self.logger.info(f"=== ПОЛУЧЕНО СООБЩЕНИЕ ТИПА: {message_type} ===")
-            self.logger.debug(f"Полное сообщение: {message}")
             
             # Если мы ожидаем ответ определенного типа
             if (self.expected_response_type and 
@@ -305,9 +330,16 @@ class SecureNetworkClient:
                 self.logger.debug("Получено подтверждение heartbeat")
             elif message_type == 'error':
                 error_msg = message.get('message', 'Неизвестная ошибка')
-                self.logger.error(f"Ошибка от сервера: {error_msg}")
-                if self.status_handler:
-                    self.status_handler('error', error_msg)
+                
+                # Игнорируем ошибки о несуществующих звонках - это нормальная ситуация
+                if "Звонок не найден" in error_msg or "call_not_found" in error_msg:
+                    self.logger.info("Игнорируем ошибку о несуществующем звонке (нормальная ситуация)")
+                elif "Неверный тип ответа на звонок" in error_msg:
+                    self.logger.warning("Сервер сообщает о неверном типе ответа на звонок. Проверьте формат отправляемых данных.")
+                else:
+                    self.logger.error(f"Ошибка от сервера: {error_msg}")
+                    if self.status_handler:
+                        self.status_handler('error', error_msg)
             
             # Обработка сообщений о звонках
             elif message_type == 'call_request':
@@ -353,6 +385,30 @@ class SecureNetworkClient:
                 if self.call_handler:
                     self.call_handler('call_info', from_user, call_id, call_port)
                     
+            # Обработка ответов на запросы завершения звонка
+            elif message_type == 'call_end_response':
+                status = message.get('status')
+                call_id = message.get('call_id')
+                duration = message.get('duration', 0)
+                
+                if status == 'already_ended':
+                    self.logger.info(f"Звонок {call_id} уже был завершен (нормальная ситуация)")
+                elif status == 'ended':
+                    self.logger.info(f"Звонок {call_id} успешно завершен, длительность: {duration} сек.")
+                else:
+                    self.logger.warning(f"Неизвестный статус завершения звонка: {status}")
+                    
+            elif message_type == 'call_answer_response':
+                status = message.get('status')
+                call_id = message.get('call_id')
+                
+                if status == 'call_not_found':
+                    self.logger.info(f"Звонок {call_id} не найден при попытке ответа")
+                elif status in ['accepted', 'rejected']:
+                    self.logger.info(f"Ответ на звонок {call_id}: {status}")
+                else:
+                    self.logger.warning(f"Неизвестный статус ответа на звонок: {status}")
+                    
             else:
                 self.logger.warning(f"Неизвестный тип сообщения: {message_type}")
                     
@@ -366,22 +422,71 @@ class SecureNetworkClient:
         """Отправка зашифрованного сообщения на сервер"""
         with self.socket_lock:
             try:
+                self.logger.info("=== НАЧАЛО ОТПРАВКИ СООБЩЕНИЯ ===")
+
                 if not self.connected:
                     self.logger.error("Нет подключения к серверу")
                     return False
 
+                if not self.server_socket:
+                    self.logger.error("❌ Нет сокета сервера")
+                    return False
+
+                # Проверяем cipher_suite
+                if not self.cipher_suite:
+                    self.logger.error("❌ Нет cipher_suite для шифрования")
+                    return False
+
+                # Логируем отправляемые данные (без пароля)
+                logged_data = data.copy()
+                if 'password' in logged_data:
+                    logged_data['password'] = '***'
+                self.logger.info(f"📤 Отправляемые данные: {logged_data}")
+
+
+                # Сериализуем в JSON
                 json_data = json.dumps(data, ensure_ascii=False).encode()
+                self.logger.info(f"📄 JSON данные ({len(json_data)} байт)")
+
+                # Шифруем
                 encrypted_data = self.cipher_suite.encrypt(json_data)
-                
+                self.logger.info(f"🔒 Зашифрованные данные ({len(encrypted_data)} байт)")
+
                 # Отправляем данные с маркером конца
                 data_to_send = encrypted_data + b"<END>"
+                self.logger.info(f"📦 Полные данные для отправки ({len(data_to_send)} байт)")
+                
+                # Отправляем данные
                 total_sent = 0
-                while total_sent < len(data_to_send):
-                    sent = self.server_socket.send(data_to_send[total_sent:])
-                    if sent == 0:
-                        raise RuntimeError("Соединение разорвано")
-                    total_sent += sent
+                attempts = 0
+                max_attempts = 3
+                
+                while total_sent < len(data_to_send) and attempts < max_attempts:
+                    try:
+                        sent = self.server_socket.send(data_to_send[total_sent:])
+                        if sent == 0:
+                            self.logger.error("❌ Соединение разорвано (sent=0)")
+                            self.connected = False
+                            return False
+                        
+                        total_sent += sent
+                        self.logger.info(f"📨 Отправлено {sent} байт, всего {total_sent}/{len(data_to_send)}")
                     
+                    except socket.error as e:
+                        attempts += 1
+                        self.logger.warning(f"⚠️ Ошибка сокета (попытка {attempts}/{max_attempts}): {e}")
+                        
+                        if attempts >= max_attempts:
+                            raise e
+                        time.sleep(0.1)  # Короткая пауза перед повторной попыткой
+
+                    if total_sent == len(data_to_send):
+                        self.logger.info("✅ Сообщение успешно отправлено")
+                        return True
+                    else:
+                        self.logger.error(f"❌ Отправлено только {total_sent}/{len(data_to_send)} байт")
+                        return False
+
                 self.logger.debug(f"Отправлено {total_sent} байт")
                 return True
                 
@@ -391,6 +496,8 @@ class SecureNetworkClient:
                 return False
             except Exception as e:
                 self.logger.error(f"Ошибка отправки сообщения: {e}")
+                import traceback
+                self.logger.error(f"Трассировка: {traceback.format_exc()}")
                 return False
 
     def send_request(self, request_data, expected_response_type, timeout=10):
@@ -449,14 +556,10 @@ class SecureNetworkClient:
                 'to': to_username,
                 'message': message,
                 'timestamp': time.time(),
-                'from': self.username,
-                'message_id': message_id
+                'message_id': message_id,
+                'session_token': self.session_token
             }
             
-            # Добавляем session_token для аутентификации
-            if self.session_token:
-                message_data['session_token'] = self.session_token
-                
             self.logger.info(f"Отправка сообщения пользователю {to_username}: {message} (ID: {message_id})")
             success = self.send_encrypted_message(message_data)
             
@@ -477,7 +580,7 @@ class SecureNetworkClient:
         try:
             if not self.connected:
                 self.logger.error("Нет подключения к серверу")
-                return False
+                return None
 
             call_id = str(uuid.uuid4())
                 
@@ -486,13 +589,9 @@ class SecureNetworkClient:
                 'to': to_username,
                 'call_type': call_type,
                 'call_id': call_id,
-                'from': self.username
+                'session_token': self.session_token
             }
             
-            # Добавляем session_token для аутентификации
-            if self.session_token:
-                call_data['session_token'] = self.session_token
-                
             self.logger.info(f"Отправка запроса на звонок пользователю {to_username}, тип: {call_type}")
             success = self.send_encrypted_message(call_data)
             
@@ -507,30 +606,32 @@ class SecureNetworkClient:
             self.logger.error(f"Ошибка отправки запроса на звонок: {e}")
             return None
 
-    def send_call_response(self, to_username, call_id, accepted=True, call_port=None):
-        """Отправка ответа на звонок"""
+    def send_call_answer(self, call_id, answer, call_port=None):
+        """Отправка ответа на звонок (accept или reject)"""
         try:
-            if not self.connected:
-                self.logger.error("Нет подключения к серверу")
+            if not self.connected or not self.server_socket:
+                if not self.ensure_connection():
+                    self.logger.error("Не удалось восстановить соединение")
+                    return False
+
+            # Проверяем корректность ответа
+            if answer not in ['accept', 'reject']:
+                self.logger.error(f"Недопустимый тип ответа на звонок: {answer}")
                 return False
 
-            response_type = 'call_accepted' if accepted else 'call_rejected'
-                
             response_data = {
-                'type': response_type,
-                'to': to_username,
+                'type': 'call_answer',
                 'call_id': call_id,
-                'from': self.username
+                'answer': answer,
+                'session_token': self.session_token
             }
             
-            if accepted and call_port is not None:
+            if answer == 'accept':
                 response_data['call_port'] = call_port
             
-            # Добавляем session_token для аутентификации
-            if self.session_token:
-                response_data['session_token'] = self.session_token
-                
-            self.logger.info(f"Отправка ответа на звонок пользователю {to_username}: {response_type}")
+            self.logger.info(f"Отправка ответа на звонок {call_id}: {answer}")
+            self.logger.debug(f"Данные ответа: {response_data}")
+            
             success = self.send_encrypted_message(response_data)
             
             if success:
@@ -541,10 +642,10 @@ class SecureNetworkClient:
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Ошибка отправки ответа на звонок: {e}")
+            self.logger.error(f"Критическая ошибка: {e}")
             return False
 
-    def send_call_end(self, to_username, call_id):
+    def send_call_end(self, call_id):
         """Отправка сообщения о завершении звонка"""
         try:
             if not self.connected:
@@ -552,17 +653,12 @@ class SecureNetworkClient:
                 return False
 
             end_data = {
-                'type': 'call_ended',
-                'to': to_username,
+                'type': 'call_end',
                 'call_id': call_id,
-                'from': self.username
+                'session_token': self.session_token
             }
             
-            # Добавляем session_token для аутентификации
-            if self.session_token:
-                end_data['session_token'] = self.session_token
-                
-            self.logger.info(f"Отправка сообщения о завершении звонка пользователю {to_username}")
+            self.logger.info(f"Отправка сообщения о завершении звонка {call_id}")
             success = self.send_encrypted_message(end_data)
             
             if success:
@@ -576,37 +672,33 @@ class SecureNetworkClient:
             self.logger.error(f"Ошибка отправки сообщения о завершении звонка: {e}")
             return False
 
-    def send_call_info(self, to_username, call_id, call_port):
-        """Отправка информации о звонке (порт для подключения)"""
+    def send_ice_candidate(self, call_id, candidate, target_user):
+        """Отправка ICE-кандидата для WebRTC"""
         try:
             if not self.connected:
                 self.logger.error("Нет подключения к серверу")
                 return False
 
-            info_data = {
-                'type': 'call_info',
-                'to': to_username,
+            ice_data = {
+                'type': 'ice_candidate',
                 'call_id': call_id,
-                'call_port': call_port,
-                'from': self.username
+                'candidate': candidate,
+                'target_user': target_user,
+                'session_token': self.session_token
             }
             
-            # Добавляем session_token для аутентификации
-            if self.session_token:
-                info_data['session_token'] = self.session_token
-                
-            self.logger.info(f"Отправка информации о звонке пользователю {to_username}, порт: {call_port}")
-            success = self.send_encrypted_message(info_data)
+            self.logger.info(f"Отправка ICE-кандидата для звонка {call_id} пользователю {target_user}")
+            success = self.send_encrypted_message(ice_data)
             
             if success:
-                self.logger.info(f"Информация о звонке успешно отправлена")
+                self.logger.info(f"ICE-кандидат успешно отправлен")
                 return True
             else:
-                self.logger.error(f"Не удалось отправить информацию о звонке")
+                self.logger.error(f"Не удалось отправить ICE-кандидат")
                 return False
                 
         except Exception as e:
-            self.logger.error(f"Ошибка отправки информации о звонке: {e}")
+            self.logger.error(f"Ошибка отправки ICE-кандидата: {e}")
             return False
 
     def register(self, username, password, email=""):
@@ -681,12 +773,37 @@ class SecureNetworkClient:
         users = response.get('users', [])
         self.logger.info(f"Получено пользователей: {len(users)}")
         
+        # ✅ ОБНОВЛЯЕМ ИНФОРМАЦИЮ О КЛИЕНТАХ
+        self.update_clients_info(users)
+
         # Извлекаем только имена пользователей из словарей
         if users and isinstance(users[0], dict):
             usernames = [user.get('username', '') for user in users if user.get('username')]
             return usernames
         else:
             return users
+
+    def send_client_info(self, p2p_port=0, external_ip=''):
+        """Отправка информации о клиенте (P2P порт и внешний IP)"""
+        if not self.session_token:
+            self.logger.error("Попытка отправить client_info без авторизации")
+            return False
+            
+        request_data = {
+            'type': 'client_info',
+            'p2p_port': p2p_port,
+            'external_ip': external_ip,
+            'session_token': self.session_token
+        }
+        
+        self.logger.info(f"Отправка client_info: порт={p2p_port}, IP={external_ip}")
+        return self.send_encrypted_message(request_data)
+
+    def logout(self):
+        """Выход из системы"""
+        self.session_token = None
+        self.username = None
+        self.logger.info("Выход из системы выполнен")
 
     def disconnect(self):
         """Отключение от сервера"""
@@ -716,6 +833,31 @@ class SecureNetworkClient:
         except Exception as e:
             self.logger.error(f"Ошибка переподключения: {e}")
             return False
+
+    def check_connection(self):
+        """Проверка состояния соединения"""
+        self.logger.info("=== ПРОВЕРКА СОЕДИНЕНИЯ ===")
+        self.logger.info(f"connected: {self.connected}")
+        self.logger.info(f"server_socket: {self.server_socket}")
+        self.logger.info(f"session_token: {'Есть' if self.session_token else 'Нет'}")
+        self.logger.info(f"cipher_suite: {'Есть' if self.cipher_suite else 'Нет'}")
+
+        if self.connected and self.server_socket:
+            try:
+                # Простая проверка "ping"
+                test_data = {'type': 'heartbeat', 'session_token': self.session_token}
+                return self.send_encrypted_message(test_data)
+            except:
+                return False
+        return False
+
+    def ensure_connection(self):
+        """Обеспечение соединения с сервером (переподключение при необходимости)"""
+        if self.check_connection():
+            return True
+    
+        self.logger.warning("Соединение разорвано, пытаемся переподключиться...")
+        return self.reconnect()
 
     def start_heartbeat(self):
         """Периодическая отправка heartbeat для поддержания сессии"""
@@ -851,6 +993,260 @@ class SecureNetworkClient:
             
         except Exception as e:
             self.logger.error(f"Ошибка остановки звонка: {e}")
+
+    def update_clients_info(self, users):
+        """Обновление информации о клиентах при получении списка пользователей"""
+        try:
+            for user in users:
+                if isinstance(user, dict):
+                    username = user.get('username')
+                    if username and username not in self.clients_info:
+                        self.clients_info[username] = {
+                            'external_ip': user.get('external_ip', ''),
+                            'p2p_port': user.get('p2p_port', 0)
+                        }
+        except Exception as e:
+            self.logger.error(f"Ошибка обновления информации о клиентах: {e}")
+
+    # Универсальные методы для работы с аудио
+    def setup_universal_audio(self):
+        """Универсальная настройка аудио - БЕЗОПАСНАЯ ВЕРСИЯ"""
+        try:
+            # Проверяем доступность sounddevice
+            try:
+                import sounddevice as sd
+                self.sd = sd
+            
+                # Простая проверка доступности аудио
+                try:
+                    devices = sd.query_devices()
+                    self.audio_available = len(devices) > 0
+                    self.audio_system = "Доступно"
+                    self.logger.info(f"Аудио система инициализирована, устройств: {len(devices)}")
+                    return True
+                except Exception as e:
+                    self.logger.warning(f"Аудио устройства недоступны: {e}")
+                    self.audio_available = False
+                    return False
+                
+            except ImportError:
+                self.logger.warning("SoundDevice не установлен, аудио недоступно")
+                self.audio_available = False
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка инициализации универсального аудио: {e}")
+            self.audio_available = False
+            return False
+
+    def connect_to_call_server(self, host, port, call_id):
+        """Подключение к серверу звонка другого пользователя"""
+        try:
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.settimeout(5)
+            call_socket.connect((host, port))
+        
+            self.call_sockets[call_id] = call_socket
+            self.logger.info(f"Подключение к звонку {call_id} на {host}:{port} установлено")
+            return True
+        
+        except Exception as e:
+            self.logger.error(f"Ошибка подключения к серверу звонка: {e}")
+            return False
+
+    def send_call_answer(self, call_id, answer, call_port=None):
+        """Отправка ответа на звонок(accept или reject)"""
+        try:
+            if not self.connected or not self.server_socket:
+                # ИСПРАВЛЕНО: убрана лишняя строка с if not self.ensure_connection()
+                
+                if not self.ensure_connection():
+                    self.logger.error("Не удалось восстановить соединение")
+                    return False
+
+                
+            # Проверяем корректность ответа
+            if answer not in ['accept', 'reject']:
+                self.logger.error(f"Недопустимый тип ответа на звонок: {answer}")
+                return False
+
+            response_data = {
+                'type': 'call_answer',
+                'call_id': call_id,
+                'answer': answer,
+                'session_token': self.session_token
+            }
+        
+            if answer == 'accept' and call_port is not None:
+                response_data['call_port'] = call_port
+        
+            self.logger.info(f"Отправка ответа на звонок {call_id}: {answer}")
+            self.logger.debug(f"Данные ответа: {response_data}")
+            
+            success = self.send_encrypted_message(response_data)
+        
+            if success:
+                self.logger.info(f"Ответ на звонок успешно отправлен")
+                return True
+            else:
+                self.logger.error(f"Не удалось отправить ответ на звонок")
+                return False
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка отправки ответа на звонок: {e}")
+            return False
+
+    def _detect_active_audio_system(self):
+        """Определение активной звуковой системы"""
+        try:
+            import subprocess
+            import os
+            
+            # Проверяем PipeWire
+            if os.path.exists("/usr/bin/pw-top") or "pipewire" in os.popen("ps aux").read().lower():
+                return "PipeWire"
+            
+            # Проверяем PulseAudio
+            if os.path.exists("/usr/bin/pulseaudio") or "pulseaudio" in os.popen("ps aux").read().lower():
+                return "PulseAudio"
+            
+            # Проверяем через sounddevice
+            try:
+                devices = self.sd.query_devices()
+                if devices:
+                    # Анализируем имена устройств для определения системы
+                    device_names = [device['name'].lower() for device in devices]
+                    if any('pipewire' in name for name in device_names):
+                        return "PipeWire"
+                    elif any('pulse' in name for name in device_names):
+                        return "PulseAudio"
+                    else:
+                        return "ALSA"
+            except:
+                pass
+            
+            return "ALSA (по умолчанию)"
+            
+        except Exception as e:
+            self.logger.warning(f"Не удалось определить звуковую систему: {e}")
+            return "Неизвестно"
+
+    def create_universal_audio_stream(self, callback, sample_rate=16000, channels=1):
+        """Создание универсального аудио потока"""
+        if not self.audio_available:
+            self.logger.error("Аудио недоступно")
+            return None
+        
+        try:
+            import sounddevice as sd
+            
+            stream = sd.Stream(
+                samplerate=sample_rate,
+                channels=channels,
+                dtype='float32',
+                callback=callback,
+                latency='low'
+            )
+            
+            self.logger.info("Универсальный аудио поток создан")
+            return stream
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка создания аудио потока: {e}")
+            return None
+
+    def test_audio_system(self):
+        """Тестирование звуковой системы"""
+        if not self.audio_available:
+            return "Аудио недоступно"
+        
+        try:
+            import sounddevice as sd
+            import numpy as np
+            
+            info = f"Активная звуковая система: {self.audio_system}\n\n"
+            
+            devices = sd.query_devices()
+            default_input = sd.default.device[0]
+            default_output = sd.default.device[1]
+            
+            info += f"Устройств найдено: {len(devices)}\n"
+            info += f"Устройство ввода по умолчанию: {default_input}\n"
+            info += f"Устройство вывода по умолчанию: {default_output}\n\n"
+            
+            # Простой тест воспроизведения
+            try:
+                duration = 1.0
+                frequency = 440
+                sample_rate = 44100
+                
+                t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
+                tone = 0.3 * np.sin(2 * np.pi * frequency * t)
+                
+                sd.play(tone, sample_rate)
+                sd.wait()
+                
+                info += "✅ Тест воспроизведения выполнен успешно!"
+            except Exception as e:
+                info += f"❌ Ошибка теста воспроизведения: {e}"
+            
+            return info
+            
+        except Exception as e:
+            return f"Ошибка тестирования аудио: {e}"
+    
+    def start_call_server(self, call_id, port=0):
+        """Запуск сервера для приема медиа-данных"""
+        try:
+            # ✅ ПРОВЕРЯЕМ, НЕ ЗАПУЩЕН ЛИ УЖЕ СЕРВЕР ДЛЯ ЭТОГО ЗВОНКА
+            if call_id in self.call_sockets:
+                self.logger.info(f"Сервер для звонка {call_id} уже запущен")
+                return self.call_ports.get(call_id)
+            
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        
+            # ✅ БЕЗОПАСНАЯ ПРИВЯЗКА С ОБРАБОТКОЙ ОШИБОК
+            try:
+                call_socket.bind(('0.0.0.0', port))
+                call_socket.listen(1)
+            
+                actual_port = call_socket.getsockname()[1]
+                self.call_sockets[call_id] = call_socket
+                self.call_ports[call_id] = actual_port
+            
+                self.logger.info(f"Сервер звонка {call_id} запущен на порту {actual_port}")
+                return actual_port
+            
+            except Exception as bind_error:
+                self.logger.error(f"Ошибка привязки сервера звонка: {bind_error}")
+                call_socket.close()
+                return None
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка запуска сервера звонка: {e}")  # ✅ ИСПРАВЛЕНО: self.logger
+        return None
+   
+    def cleanup_audio_resources(self):
+        """Очистка всех аудио ресурсов"""
+        try:
+            # Останавливаем все активные звонки
+            for call_id in list(self.call_threads.keys()):
+                self.stop_call(call_id)
+                
+            # Закрываем все аудио потоки
+            if hasattr(self, 'sd'):
+                import sounddevice as sd
+                # Останавливаем все активные потоки sounddevice
+                try:
+                    sd.stop()
+                except:
+                    pass
+                    
+            self.logger.info("Аудио ресурсы очищены")
+            
+        except Exception as e:
+            self.logger.error(f"Ошибка очистки аудио ресурсов: {e}")
 
 if __name__ == "__main__":
     client = SecureNetworkClient()
