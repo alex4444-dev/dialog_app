@@ -4,10 +4,12 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QProgressBar, QMessageBox,
                              QComboBox, QGroupBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from audio_utils import audio_manager
 import logging
 import time
 import struct
 import threading
+import socket
 import numpy as np
 
 logger = logging.getLogger('dialog_gui')
@@ -23,6 +25,9 @@ class CallWindow(QWidget):
         self.call_type = call_type
         self.call_id = call_id
         self.is_outgoing = is_outgoing
+
+        logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
+
         self.is_active = False
         self.call_duration = 0
         self.duration_timer = QTimer()
@@ -40,15 +45,28 @@ class CallWindow(QWidget):
         
         # Буфер для аудио данных
         self.audio_buffer = []
-        self.buffer_size = 10
+        self.buffer_size = 20
         self.audio_buffer_lock = threading.Lock()
-        
+        self.stream_id = f"call_{call_id}"
+
         # Счетчики для диагностики
         self.sent_packets = 0
         self.received_packets = 0
         
         self.init_ui()
         self.detect_audio_system()
+
+        # Индикатор состояния аудио
+        self.audio_status_label = QLabel("🔇 Аудио: проверка...")
+        self.audio_status_label.setAlignment(Qt.AlignCenter)
+        self.audio_status_label.setStyleSheet("font-size: 12px; color: #7f8c8d;")
+        
+        # Добавляем в layout после его создания
+        layout = self.layout()
+        if layout:
+            layout.addWidget(self.audio_status_label)
+
+        logger.info(f"🔊 CallWindow создано успешно")
         
     def init_ui(self):
         """Инициализация интерфейса окна звонка"""
@@ -200,16 +218,23 @@ class CallWindow(QWidget):
         self.reject_call()
         
     def detect_audio_system(self):
-        """Определение звуковой системы - БЕЗОПАСНАЯ ВЕРСИЯ"""
+        """Определение звуковой системы - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
             import sounddevice as sd
             self.sd = sd
             
             # Простой тест доступности аудио
             devices = sd.query_devices()
+            default_output = sd.default.device[1] if sd.default.device else None
+            
             if len(devices) > 0:
                 self.audio_available = True
-                audio_system = "Обнаружена звуковая система"
+                audio_system = f"Обнаружена звуковая система ({len(devices)} устройств)"
+                
+                # Проверяем устройство вывода по умолчанию
+                if default_output is not None and default_output < len(devices):
+                    output_device = devices[default_output]
+                    audio_system += f" | Выход: {output_device['name']}"
             else:
                 self.audio_available = False
                 audio_system = "Аудио устройства не найдены"
@@ -247,9 +272,19 @@ class CallWindow(QWidget):
             # Запускаем реальные аудио потоки
             if self.audio_available and self.call_type in ['audio', 'video']:
                 self.initialize_real_audio_streams()
+                if self.audio_initialized:
+                    self.audio_status_label.setText("🔊 Аудио: подключено")
+                    self.audio_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+                else:
+                    self.audio_status_label.setText("🔇 Аудио: ошибка инициализации")
+                    self.audio_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
+                    # Продолжаем без аудио
+                    logger.info(f"Звонок {self.call_id} продолжен без аудио")
                 logger.info("Реальные аудио потоки запущены")
             else:
                 logger.info(f"Звонок {self.call_id} начат без аудио")
+                self.audio_status_label.setText("🔇 Аудио: отключено")
+                self.audio_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
             
             logger.info(f"Звонок {self.call_id} начат")
             
@@ -258,31 +293,40 @@ class CallWindow(QWidget):
             self.show_audio_error("Ошибка инициализации звонка")
     
     def initialize_real_audio_streams(self):
-        """Инициализация реальных аудио потоков с передачей данных"""
+        """Инициализация реальных аудио потоков - УЛУЧШЕННАЯ ВЕРСИЯ ДЛЯ LINUX"""
         try:
             if self.audio_initialized:
-                logger.info("Аудио уже инициализировано")
+                logger.info("⚠️ Аудио уже инициализировано")
                 return
-            
+    
             import sounddevice as sd
-            
-            logger.info(f"Инициализация аудио: sample_rate={self.sample_rate}, channels={self.channels}")
+            import numpy as np
 
+            # Устанавливаем параметры для Linux/ALSA
+            extra_settings = {}
+            try:
+                # Пытаемся использовать более совместимые параметры для ALSA
+                extra_settings = {
+                    'latency': 'high',
+                    'dtype': np.float32
+                }
+            except:
+                pass
+    
             # Callback для захвата аудио с микрофона
             def input_callback(indata, frames, time, status):
                 if status:
                     logger.debug(f"Аудио входной статус: {status}")
-                
+        
                 try:
                     if hasattr(self, 'call_socket') and self.call_socket and self.is_active:
-                        # Отправляем аудио данные через сокет
-                        audio_data = indata.copy()
-                        self.send_audio_data(audio_data.tobytes())
-                        self.sent_packets += 1
-                        
-                        # Логируем каждые 100 пакетов
-                        if self.sent_packets % 100 == 0:
-                            logger.debug(f"Отправлено аудио пакетов: {self.sent_packets}")
+                        # Преобразуем в байты и отправляем
+                        audio_data = indata.astype(np.float32).tobytes()
+                        success = self.send_audio_data(audio_data)
+                        if success:
+                            self.sent_packets += 1
+                            if self.sent_packets % 100 == 0:
+                                logger.debug(f"🔊 Отправлено пакетов: {self.sent_packets}")        
                 except Exception as e:
                     logger.debug(f"Ошибка в input callback: {e}")
 
@@ -290,110 +334,167 @@ class CallWindow(QWidget):
             def output_callback(outdata, frames, time, status):
                 if status:
                     logger.debug(f"Аудио выходной статус: {status}")
-                
+        
                 try:
-                    with self.audio_buffer_lock:
-                        if self.audio_buffer and self.is_active:
-                            # Берем данные из буфера
-                            audio_data = self.audio_buffer.pop(0)
-                            # Проверяем размер данных
-                            if len(audio_data) == len(outdata):
-                                outdata[:] = audio_data
-                            else:
-                                # Если размеры не совпадают, обрезаем или дополняем нулями
-                                min_len = min(len(audio_data), len(outdata))
-                                outdata[:min_len] = audio_data[:min_len]
-                                if min_len < len(outdata):
-                                    outdata[min_len:] = 0
-                        else:
-                            # Если буфер пуст - тишина
-                            outdata.fill(0)
+                    # Получаем данные из буфера
+                    audio_data = self.get_audio_data(frames)
+                    if audio_data is not None:
+                        outdata[:] = audio_data.reshape(-1, 1)
+                        if self.received_packets % 100 == 0:
+                            logger.debug(f"🔊 Воспроизведено пакетов: {self.received_packets}")           
+                    else:
+                        # Заполняем тишиной
+                        outdata.fill(0)    
                 except Exception as e:
                     logger.debug(f"Ошибка в output callback: {e}")
                     outdata.fill(0)
 
-            # Создаем отдельные потоки для ввода и вывода
-            logger.info("Создание InputStream...")
-            self.input_stream = sd.InputStream(
-                samplerate=self.sample_rate,
-                blocksize=self.blocksize,
-                channels=self.channels,
-                callback=input_callback,
-                dtype=self.dtype
-            )
+            # Создаем потоки с обработкой ошибок
+            logger.info("🔧 Попытка создания аудио потоков...")
+            
+            try:
+                # Пытаемся создать InputStream
+                self.input_stream = sd.InputStream(
+                    samplerate=self.sample_rate,
+                    blocksize=self.blocksize,
+                    channels=self.channels,
+                    callback=input_callback,
+                    dtype=np.float32,
+                    **extra_settings
+                )
+                logger.info("✅ InputStream создан")
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания InputStream: {e}")
+                self.input_stream = None
 
-            logger.info("Создание OutputStream...")
-            self.output_stream = sd.OutputStream(
-                samplerate=self.sample_rate,
-                blocksize=self.blocksize,
-                channels=self.channels,
-                callback=output_callback,
-                dtype=self.dtype
-            )
+            try:
+                # Пытаемся создать OutputStream
+                self.output_stream = sd.OutputStream(
+                    samplerate=self.sample_rate,
+                    blocksize=self.blocksize,
+                    channels=self.channels,
+                    callback=output_callback,
+                    dtype=np.float32,
+                    **extra_settings
+                )
+                logger.info("✅ OutputStream создан")
+            except Exception as e:
+                logger.error(f"❌ Ошибка создания OutputStream: {e}")
+                self.output_stream = None
 
-            # Запускаем потоки
-            logger.info("Запуск аудио потоков...")
-            self.input_stream.start()
-            self.output_stream.start()
-            self.audio_initialized = True
+            # Запускаем только те потоки, которые удалось создать
+            if self.input_stream:
+                try:
+                    self.input_stream.start()
+                    logger.info("✅ InputStream запущен")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка запуска InputStream: {e}")
+                    self.input_stream = None
+
+            if self.output_stream:
+                try:
+                    self.output_stream.start()
+                    logger.info("✅ OutputStream запущен")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка запуска OutputStream: {e}")
+                    self.output_stream = None
+
+            # Если хотя бы один поток запущен, считаем аудио инициализированным
+            self.audio_initialized = self.input_stream is not None or self.output_stream is not None
             
-            # Запускаем прием аудио данных
-            self.start_audio_receiver()
-            
-            logger.info("✅ Реальные аудио потоки успешно инициализированы и запущены")
-            
+            if self.audio_initialized:
+                logger.info("✅ Аудио потоки частично или полностью инициализированы")
+            else:
+                logger.warning("⚠️ Не удалось инициализировать аудио потоки")
+        
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации реальных аудио потоков: {e}")
+            logger.error(f"❌ Критическая ошибка инициализации аудио: {e}")
+            self.show_audio_error(f"Аудио недоступно: {e}")
             self.audio_initialized = False
 
-    def send_audio_data(self, audio_data):
-        """Отправка аудио данных через сокет"""
+    def get_audio_data(self, frames):
+        """Получение аудио данных из буфера"""
+        if not self.is_active:
+            return None
         try:
-            if (hasattr(self, 'call_socket') and self.call_socket 
-                and self.is_active and self.audio_initialized):
-                
-                # Добавляем заголовок с размером данных
-                header = struct.pack('I', len(audio_data))
-                full_data = header + audio_data
-                
-                # Отправляем данные
-                self.call_socket.send(full_data)
+            with self.audio_buffer_lock:
+                if self.audio_buffer:
+                    # Берем первый элемент из буфера
+                    data = self.audio_buffer.pop(0)
+                    # Если данных меньше чем нужно, дополняем нулями
+                    if len(data) < frames:
+                        padded_data = np.zeros(frames, dtype=np.float32)
+                        padded_data[:len(data)] = data
+                        return padded_data
+                    return data[:frames]  # Обрезаем если больше
+            return None
+        except Exception as e:
+            logger.debug(f"Ошибка получения аудио данных: {e}")
+            return None
+
+    def send_audio_data(self, audio_data):
+        """Отправка аудио данных с проверкой соединения"""
+        try:
+            if (not hasattr(self, 'call_socket') or not self.call_socket or 
+                not self.is_active or not self.audio_initialized):
+                return False
+
+            # Проверяем что сокет еще подключен
+            try:
+                # Простая проверка - пытаемся отправить 0 байт
+                self.call_socket.send(b'')
+            except socket.error:
+                logger.warning("Сокет звонка отключен")
+                self.is_active = False
+                return False
+            
+            # Добавляем заголовок с размером данных
+            data_size = len(audio_data)
+            header = struct.pack('I', data_size)
+            full_data = header + audio_data
+        
+            # Отправляем данные
+            sent = self.call_socket.send(full_data)
+            if sent > 0:
+                if self.sent_packets % 50 == 0:
+                    logger.debug(f"🔊 Отправлено {sent} байт аудио данных")
                 return True
             else:
-                logger.warning("Не могу отправить аудио: нет сокета или поток не инициализирован")
+                logger.warning("🔊 Не удалось отправить аудио данные (sent=0)")
                 return False
         except Exception as e:
-            logger.debug(f"Ошибка отправки аудио данных: {e}")
+            logger.debug(f"🔊 Ошибка отправки аудио данных: {e}")
             return False
 
     def receive_audio_data(self):
         """Прием аудио данных из сокета"""
         try:
-            if (hasattr(self, 'call_socket') and self.call_socket 
+            if (hasattr(self, 'call_socket') and self.call_socket
                 and self.is_active and self.audio_initialized):
                 
+                # Устанавливаем таймаут для неблокирующего чтения
+                self.call_socket.settimeout(0.1)
+        
                 # Читаем заголовок с размером данных
                 header = self.call_socket.recv(4)
-                if not header:
-                    logger.warning("Пустой заголовок аудио данных")
+                if not header or len(header) < 4:
                     return
-                    
+            
                 data_size = struct.unpack('I', header)[0]
-                
+    
                 # Читаем аудио данные
                 audio_data = b''
                 while len(audio_data) < data_size:
-                    chunk = self.call_socket.recv(data_size - len(audio_data))
+                    chunk = self.call_socket.recv(min(4096, data_size - len(audio_data)))
                     if not chunk:
-                        logger.warning("Неполные аудио данные")
                         break
                     audio_data += chunk
-                
+        
                 if len(audio_data) == data_size:
                     # Преобразуем байты в numpy array
-                    audio_array = np.frombuffer(audio_data, dtype=self.dtype)
-                    
-                    # Добавляем в буфер с блокировкой
+                    audio_array = np.frombuffer(audio_data, dtype=np.float32)
+                
+                    # Добавляем в буфер с ограничением размера
                     with self.audio_buffer_lock:
                         if len(self.audio_buffer) < self.buffer_size:
                             self.audio_buffer.append(audio_array)
@@ -403,15 +504,18 @@ class CallWindow(QWidget):
                             self.audio_buffer.append(audio_array)
                     
                     self.received_packets += 1
-                    
-                    # Логируем каждые 100 пакетов
-                    if self.received_packets % 100 == 0:
-                        logger.debug(f"Получено аудио пакетов: {self.received_packets}")
-                else:
-                    logger.warning(f"Неполные данные: получено {len(audio_data)} из {data_size} байт")
-                        
+                
+                    if self.received_packets % 50 == 0:
+                        logger.debug(f"🔊 Получено {len(audio_data)} байт аудио данных")
+ 
+            else:
+                logger.warning("🔊 Не могу принять аудио: нет сокета или поток не инициализирован")
+                       
+        except socket.timeout:
+            pass  # Таймаут - это нормально
         except Exception as e:
-            logger.debug(f"Ошибка приема аудио данных: {e}")
+            if self.is_active:
+                logger.debug(f"Ошибка приема аудио данных: {e}")
 
     def start_audio_receiver(self):
         """Запуск потока для приема аудио данных"""
@@ -430,32 +534,43 @@ class CallWindow(QWidget):
         self.audio_receiver_thread.start()
 
     def stop_audio_streams(self):
-        """Остановка аудио-потоков - БЕЗОПАСНАЯ ВЕРСИЯ"""
+        """Остановка аудио-потоков"""
         try:
+            logger.info(f"🔴 Остановка аудио потоков для звонка {self.call_id}")
+            # Сначала сбрасываем флаг
+            self.audio_initialized = False 
+            self.is_active = False
+
+            # Останавливаем INPUT STREAM
             if hasattr(self, 'input_stream') and self.input_stream is not None:
                 try:
                     self.input_stream.stop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Ошибка остановки input stream: {e}")
                 try:
                     self.input_stream.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Ошибка закрытия input stream: {e}")
                 self.input_stream = None
                 
+            # Останавливаем OUTPUT STREAM
             if hasattr(self, 'output_stream') and self.output_stream is not None:
                 try:
                     self.output_stream.stop()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Ошибка остановки output stream: {e}")
                 try:
                     self.output_stream.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.debug(f"Ошибка закрытия output stream: {e}")
                 self.output_stream = None
+
+            # Очищаем буфер
+            with self.audio_buffer_lock:
+                self.audio_buffer.clear()
+            
+            logger.info(f"✅ Аудио потоки для звонка {self.call_id} остановлены")
                 
-            self.audio_initialized = False
-            logger.info("Аудио потоки остановлены")
         except Exception as e:
             logger.debug(f"Ошибка остановки аудио потоков: {e}")
     
@@ -551,11 +666,43 @@ class CallWindow(QWidget):
     def closeEvent(self, event):
         """Обработка закрытия окна"""
         try:
-            if self.is_active:
-                self.end_call()
-            else:
-                self.stop_audio_streams()
+            logger.info(f"Закрытие окна звонка {self.call_id}")
+            self.is_active = False
+        
+            # Останавливаем все таймеры
+            try:
+                if hasattr(self, 'duration_timer') and self.duration_timer.isActive():
+                    self.duration_timer.stop()
+            except:
+                pass
+            
+            try:
+                if hasattr(self, 'diagnostic_timer') and self.diagnostic_timer.isActive():
+                    self.diagnostic_timer.stop()
+            except:
+                pass
+            
+            # Останавливаем аудио потоки
+            self.stop_audio_streams()
+        
+            # Закрываем сокет
+            try:
+                if hasattr(self, 'call_socket') and self.call_socket:    
+                    self.call_socket.close()
+            except:
+                pass
+                
+            # Отправляем сигнал о завершении только один раз
+            if not getattr(self, 'call_ended_emitted', False):
+                try:
+                    self.call_ended.emit(self.call_id)
+                    self.call_ended_emitted = True
+                    logger.info(f"✅ Сигнал завершения звонка {self.call_id} отправлен")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка отправки сигнала завершения: {e}")
             event.accept()
+            logger.info(f"Окно звонка {self.call_id} закрыто")
+        
         except Exception as e:
-            logger.error(f"Ошибка при закрытии окна звонка: {e}")
+            logger.error(f"❌ Критическая ошибка при закрытии окна звонка: {e}")
             event.accept()

@@ -189,7 +189,7 @@ class SecureDialogServer:
             return None
 
     def send_message_to_client(self, username, message_data):
-        """Отправка сообщения конкретному клиенту"""
+        """Отправка сообщения конкретному клиенту - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
             if username not in self.clients:
                 logging.error(f"Пользователь {username} не в сети")
@@ -199,25 +199,42 @@ class SecureDialogServer:
             cipher_suite = client_data['cipher']
             client_socket = client_data['socket']
             
+            # ✅ ПРОВЕРЯЕМ, ЧТО СОКЕТ ВСЕ ЕЩЕ АКТИВЕН
+            try:
+                # Простая проверка - отправляем 0 байт
+                client_socket.send(b'')
+            except (socket.error, ConnectionResetError, BrokenPipeError):
+                logging.warning(f"Сокет пользователя {username} разорван, удаляем из списка")
+                if username in self.clients:
+                    try:
+                        self.clients[username]['socket'].close()
+                    except:
+                        pass
+                    del self.clients[username]
+                return False
+            
             encrypted_message = cipher_suite.encrypt(json.dumps(message_data).encode())
             
             # Отправляем сообщение с маркером конца
             data_to_send = encrypted_message + b"<END>"
-            client_socket.send(data_to_send)
             
-            logging.info(f"Сообщение отправлено пользователю {username}: {message_data.get('type', 'unknown')}")
-            return True
-            
+            try:
+                client_socket.send(data_to_send)
+                logging.info(f"✅ Сообщение отправлено пользователю {username}: {message_data.get('type', 'unknown')}")
+                return True
+            except (socket.error, ConnectionResetError, BrokenPipeError) as e:
+                logging.error(f"❌ Ошибка отправки сообщения пользователю {username}: {e}")
+                # Удаляем клиента при ошибке отправки
+                if username in self.clients:
+                    try:
+                        self.clients[username]['socket'].close()
+                    except:
+                        pass
+                    del self.clients[username]
+                return False
+                
         except Exception as e:
-            logging.error(f"Ошибка отправки сообщения пользователю {username}: {e}")
-            # Если отправка не удалась, удаляем клиента из списка
-            if username in self.clients:
-                try:
-                    self.clients[username]['socket'].close()
-                except:
-                    pass
-                del self.clients[username]
-                logging.info(f"Пользователь {username} удален из списка онлайн-клиентов")
+            logging.error(f"❌ Неожиданная ошибка при отправке сообщения пользователю {username}: {e}")
             return False
 
     def handle_register(self, request, client_ip):
@@ -487,7 +504,7 @@ class SecureDialogServer:
             }
 
     def handle_call_request(self, request, from_username):
-        """Обработка запроса на звонок"""
+        """Обработка запроса на звонок - УЛУЧШЕННАЯ ВЕРСИЯ"""
         try:
             to_username = request.get('to')
             call_type = request.get('call_type', 'audio')
@@ -500,6 +517,15 @@ class SecureDialogServer:
                 return {
                     'type': 'error',
                     'message': 'Не указан получатель звонка'
+                }
+            
+            # ✅ ПРОВЕРКА: НЕЛЬЗЯ ЗВОНИТЬ САМОМУ СЕБЕ
+            if from_username == to_username:
+                return {
+                    'type': 'call_response',
+                    'status': 'error',
+                    'call_id': call_id,
+                    'message': 'Нельзя звонить самому себе'
                 }
             
             # Проверяем сессию
@@ -520,8 +546,8 @@ class SecureDialogServer:
                 }
             
             # Проверяем, не занят ли получатель другим звонком
-            if to_username in self.active_calls:
-                logging.warning(f"❌ Пользователь {to_username} занят другим звонком")
+            if to_username in [call['to'] for call in self.active_calls.values() if call['status'] == 'ringing']:
+                logging.warning(f"❌ Пользователь {to_username} уже занят в другом звонке")
                 return {
                     'type': 'call_response',
                     'status': 'user_busy',
@@ -582,14 +608,14 @@ class SecureDialogServer:
             }
 
     def handle_call_answer(self, request, from_username):
-        """Обработка ответа на звонок"""
+        """Обработка ответа на звонок - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
         try:
             call_id = request.get('call_id')
             answer = request.get('answer')
             session_token = request.get('session_token')
             call_port = request.get('call_port')
 
-            logging.info(f"🔊 Обработка ответа на звонок {call_id} от {from_username}: {answer}")
+            logging.info(f"🔊 Обработка ответа на звонок {call_id} от {from_username}: {answer}, порт: {call_port}")
 
             if not call_id or not answer:
                 return {
@@ -628,22 +654,19 @@ class SecureDialogServer:
                 call_data['status'] = 'active'
                 call_data['answer_time'] = datetime.now()
 
-                # Отправляем подтверждение звонка инициатору
+                # ✅ ВСЕГДА отправляем call_accepted, даже если call_port = 0 или None
                 call_accepted = {
                     'type': 'call_accepted',
                     'call_id': call_id,
                     'from': from_username,
+                    'call_port': call_port if call_port is not None else 0
                 }
                 
-                # ✅ ВСЕГДА ДОБАВЛЯЕМ call_port, ДАЖЕ ЕСЛИ ОН None
-                if call_port is not None:
-                    call_accepted['call_port'] = call_port
-                    logging.info(f"🔊 Передаем порт медиа-сервера: {call_port}")
+                logging.info(f"🔊 Отправка call_accepted для звонка {call_id}, порт: {call_port}")
                 
-                # ✅ УПРОЩАЕМ: отправляем только базовую информацию
                 if self.send_message_to_client(call_data['from'], call_accepted):
-                    logging.info(f"✅ Пользователь {from_username} принял звонок {call_id}, порт: {call_port}")
-                
+                    logging.info(f"✅ Пользователь {from_username} принял звонок {call_id}")
+
                     # Обновляем историю звонков
                     self.cursor.execute(
                         "UPDATE call_history SET status = ? WHERE call_id = ?",
@@ -658,6 +681,7 @@ class SecureDialogServer:
                         'message': 'Звонок принят'
                     }
                 else:
+                    logging.error(f"❌ Не удалось отправить call_accepted для звонка {call_id}")
                     return {
                         'type': 'call_answer_response',
                         'status': 'failed',
@@ -873,6 +897,53 @@ class SecureDialogServer:
                 'message': f'Ошибка получения статуса: {e}'
             }
 
+    def cleanup_user_calls(self, username, reason="user_disconnected"):
+        """Завершение всех активных звонков пользователя"""
+        try:
+            calls_to_end = []
+            for call_id, call_data in self.active_calls.items():
+                if username in [call_data['from'], call_data['to']]:
+                    calls_to_end.append(call_id)
+            
+            logging.info(f"🔊 Завершение {len(calls_to_end)} звонков для пользователя {username}, причина: {reason}")
+            
+            for call_id in calls_to_end:
+                try:
+                    call_data = self.active_calls[call_id]
+                    other_party = call_data['to'] if username == call_data['from'] else call_data['from']
+                    
+                    # Отправляем уведомление о завершении звонка другому участнику
+                    if other_party in self.clients:
+                        call_ended = {
+                            'type': 'call_ended',
+                            'call_id': call_id,
+                            'from': username,
+                            'reason': reason
+                        }
+                        self.send_message_to_client(other_party, call_ended)
+                        logging.info(f"🔊 Уведомление о завершении звонка {call_id} отправлено пользователю {other_party}")
+                    
+                    # Обновляем историю звонков
+                    end_time = datetime.now()
+                    start_time = call_data['start_time']
+                    duration = int((end_time - start_time).total_seconds())
+                    
+                    self.cursor.execute(
+                        "UPDATE call_history SET status = ?, end_time = ?, duration = ? WHERE call_id = ?",
+                        (f'ended_{reason}', end_time, duration, call_id)
+                    )
+                    self.conn.commit()
+                    
+                    # Удаляем из активных звонков
+                    del self.active_calls[call_id]
+                    
+                    logging.info(f"🔊 Звонок {call_id} завершен из-за {reason}")
+                except Exception as e:
+                    logging.error(f"❌ Ошибка при завершении звонка {call_id}: {e}")
+                    
+        except Exception as e:
+            logging.error(f"❌ Ошибка в cleanup_user_calls: {e}")
+
     def handle_client(self, client_socket, address):
         """Обработка подключения клиента"""
         username = None
@@ -1073,51 +1144,13 @@ class SecureDialogServer:
             # При отключении клиента завершаем все его активные звонки
             if username:
                 logging.info(f"🔊 Обработка отключения пользователя {username}")
-                
-                # Находим все активные звонки пользователя
-                calls_to_end = []
-                for call_id, call_data in self.active_calls.items():
-                    if username in [call_data['from'], call_data['to']]:
-                        calls_to_end.append(call_id)
-                
-                logging.info(f"🔊 Найдено активных звонков для завершения: {len(calls_to_end)}")
-                
-                # Завершаем найденные звонки
-                for call_id in calls_to_end:
-                    try:
-                        call_data = self.active_calls[call_id]
-                        other_party = call_data['to'] if username == call_data['from'] else call_data['from']
-                        
-                        # Отправляем уведомление о завершении звонка другому участнику
-                        if other_party in self.clients:
-                            call_ended = {
-                                'type': 'call_ended',
-                                'call_id': call_id,
-                                'from': username,
-                                'reason': 'user_disconnected'
-                            }
-                            self.send_message_to_client(other_party, call_ended)
-                            logging.info(f"🔊 Уведомление о завершении звонка {call_id} отправлено пользователю {other_party}")
-                        
-                        # Обновляем историю звонков
-                        end_time = datetime.now()
-                        start_time = call_data['start_time']
-                        duration = int((end_time - start_time).total_seconds())
-                        
-                        self.cursor.execute(
-                            "UPDATE call_history SET status = ?, end_time = ?, duration = ? WHERE call_id = ?",
-                            ('ended_abruptly', end_time, duration, call_id)
-                        )
-                        self.conn.commit()
-                        
-                        # Удаляем из активных звонков
-                        del self.active_calls[call_id]
-                        
-                        logging.info(f"🔊 Звонок {call_id} завершен из-за отключения пользователя {username}")
-                    except Exception as e:
-                        logging.error(f"❌ Ошибка при завершении звонка {call_id}: {e}")
+                self.cleanup_user_calls(username, "user_disconnected")
                 
                 if username in self.clients:
+                    try:
+                        self.clients[username]['socket'].close()
+                    except:
+                        pass
                     del self.clients[username]
                     logging.info(f"[-] Пользователь {username} отключился")
             try:
@@ -1153,9 +1186,9 @@ class SecureDialogServer:
                 logging.error(f"Ошибка при принятии соединения: {e}")
 
     def cleanup_inactive_clients(self):
-        """Очистка неактивных клиентов"""
+        """Очистка неактивных клиентов - УЛУЧШЕННАЯ ВЕРСИЯ"""
         while True:
-            time.sleep(30)
+            time.sleep(30)  # Проверяем каждые 30 секунд
             try:
                 current_time = datetime.now()
                 inactive_users = []
@@ -1168,16 +1201,22 @@ class SecureDialogServer:
                             last_seen = datetime.fromisoformat(last_seen_str)
                             time_diff = (current_time - last_seen).total_seconds()
                             
-                            # Если клиент не активен более 5 минут, помечаем для удаления
-                            if time_diff > 300:
+                            # ✅ УВЕЛИЧИВАЕМ ТАЙМАУТ ДО 2 МИНУТ
+                            if time_diff > 120:  # 2 минуты
                                 inactive_users.append(username)
                         except ValueError:
                             inactive_users.append(username)
+                    else:
+                        # Если нет времени последней активности, помечаем как неактивного
+                        inactive_users.append(username)
                 
                 # Удаляем неактивных клиентов
                 for username in inactive_users:
                     if username in self.clients:
                         try:
+                            # ✅ ЗАВЕРШАЕМ АКТИВНЫЕ ЗВОНКИ ПЕРЕД УДАЛЕНИЕМ
+                            self.cleanup_user_calls(username, "user_timeout")
+                            
                             self.clients[username]['socket'].close()
                         except:
                             pass

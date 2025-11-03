@@ -10,6 +10,8 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QIcon
 
+
+
 # Добавляем путь к текущей директории для импорта модулей
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -22,6 +24,8 @@ try:
     from chat_window import ChatWindow
     from notifications import NotificationWindow
     from call_window import CallWindow
+    from call_utils import call_manager
+    from audio_utils import audio_manager
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
     print("Убедитесь, что все файлы находятся в той же папке")
@@ -45,13 +49,14 @@ class SecureMainWindow(QMainWindow):
     sig_connection_status = pyqtSignal(str)
     sig_message_status = pyqtSignal(str, str)
     sig_call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
+    sig_system_message = pyqtSignal(str)  # Для безопасных системных сообщений
+    sig_call_status = pyqtSignal(str, str)  # call_id, action
     
     def __init__(self, network_client, username):
         super().__init__()
         self.network_client = network_client
         self.username = username
         self.active_chats = {}
-        self.update_thread = None
         self.is_authenticated = True
         self.pending_messages = {}
         self.notifications_enabled = True
@@ -61,16 +66,31 @@ class SecureMainWindow(QMainWindow):
         self.active_calls = {}
         self.pending_calls = {}
         
+        # Таймер для обновлений вместо отдельного потока
+        self.update_timer = QTimer()
+        self.update_timer.timeout.connect(self.on_update_timer)
+        
         # Сразу подключаем сигналы к слотам
         self.sig_message_received.connect(self.handle_message)
         self.sig_user_list_updated.connect(self.update_user_list)
         self.sig_connection_status.connect(self.update_connection_status)
         self.sig_message_status.connect(self.handle_message_status)
         self.sig_call_received.connect(self.handle_call)
+        self.sig_system_message.connect(self.on_system_message)
+        self.sig_call_status.connect(self.on_call_status)
+
+        # ДИАГНОСТИКА: проверяем установку обработчиков
+        logger.info("🔊 Установка обработчиков сетевых событий...")
         
-        # Устанавливаем обработчик звонков
+        # Устанавливаем безопасные обработчики
+        self.network_client.set_message_handler(self.handle_incoming_message)
+        self.network_client.set_status_handler(self.handle_incoming_status)
         self.network_client.set_call_handler(self.handle_incoming_call)
         
+        logger.info(f"🔊 Обработчик сообщений: {self.network_client.message_handler}")
+        logger.info(f"🔊 Обработчик статусов: {self.network_client.status_handler}")
+        logger.info(f"🔊 Обработчик звонков: {self.network_client.call_handler}")
+
         self.init_ui()
         
     def init_ui(self):
@@ -205,31 +225,40 @@ class SecureMainWindow(QMainWindow):
         
     def start_messaging(self):
         """Запуск работы мессенджера после успешной аутентификации"""
-        # Устанавливаем обработчик входящих сообщений
-        logger.info("Установка обработчиков сообщений и статусов")
-        self.network_client.set_message_handler(self.handle_incoming_message)
-        self.network_client.set_status_handler(self.handle_incoming_status)
         self.sig_connection_status.emit("✅ Подключено к серверу")
         
         # Инициализируем аудио
-        audio_ready = self.network_client.setup_universal_audio()
-        if audio_ready:
-            self.system_chat.append(f"✅ Аудио система: {self.network_client.audio_system}")
-        else:
+        try:
+            audio_ready = self.network_client.setup_universal_audio()
+            if audio_ready:
+                self.system_chat.append(f"✅ Аудио система: {self.network_client.audio_system}")
+            else:
+                self.system_chat.append("⚠️ Аудио недоступно")
+        except Exception as e:
+            logger.error(f"Ошибка инициализации аудио: {e}")
             self.system_chat.append("⚠️ Аудио недоступно")
 
         # Запускаем heartbeat
-        self.network_client.start_heartbeat()
-        
+        try:
+            self.network_client.start_heartbeat()
+        except Exception as e:
+            logger.error(f"Ошибка запуска heartbeat: {e}")
+
         # Отправляем информацию о клиенте
-        self.network_client.send_client_info()
-        
-        # Запускаем получение обновлений
+        try:
+            self.network_client.send_client_info()
+        except Exception as e:
+            logger.error(f"Ошибка отправки client_info: {e}")
+
+        # Запускаем получение обновлений через таймер
         self.start_listen_for_updates()
         
         # Обновляем список пользователей
-        self.refresh_user_list()
-        
+        try:
+            self.refresh_user_list()
+        except Exception as e:
+            logger.error(f"Ошибка обновления списка пользователей: {e}")
+
         self.system_chat.append(f"✅ Успешный вход как: {self.username}")
         
     def create_system_tab(self):
@@ -250,7 +279,7 @@ class SecureMainWindow(QMainWindow):
         
         # Меню Файл
         file_menu = menubar.addMenu('Файл')
-        
+
         refresh_action = QAction('🔄 Обновить список пользователей', self)
         refresh_action.triggered.connect(self.refresh_user_list)
         file_menu.addAction(refresh_action)
@@ -292,7 +321,7 @@ class SecureMainWindow(QMainWindow):
         profile_action = QAction('👤 Мой профиль', self)
         profile_action.triggered.connect(self.show_profile)
         account_menu.addAction(profile_action)
-        
+       
     def show_call_settings(self):
         """Показать настройки звонков"""
         QMessageBox.information(self, 'Настройки звонков', 
@@ -319,12 +348,7 @@ class SecureMainWindow(QMainWindow):
         
     def close_application(self):
         """Закрытие приложения"""
-        # Завершаем все активные звонки
-        for call_id in list(self.active_calls.keys()):
-            self.end_call(call_id)
-            
-        self.disconnect_from_server()
-        QApplication.quit()
+        self.close()
         
     def disconnect_from_server(self):
         """Отключение от сервера"""
@@ -344,42 +368,47 @@ class SecureMainWindow(QMainWindow):
         self.sig_message_status.emit(status, details)
         
     def handle_incoming_call(self, action, from_user, call_type=None, call_id=None):
-        """Обработка входящего звонка от сервера"""
+        """Обработка входящего звонка от сервера - С ДОБАВЛЕНИЕМ CALL_IP"""
         logger.info(f"SecureMainWindow.handle_incoming_call: Получен звонок: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
+        
+        # ДИАГНОСТИКА: выводим в системный чат
+        self.system_chat.append(f"🔊 Сетевой обработчик: {action} от {from_user}")
+        
         self.sig_call_received.emit(action, from_user, call_type, call_id)
         
     def start_listen_for_updates(self):
-        """Запуск прослушивания обновлений от сервера"""
-        if self.update_thread and self.update_thread.is_alive():
-            return
-            
-        self.update_thread = threading.Thread(target=self.listen_for_updates, daemon=True)
-        self.update_thread.start()
+        """Запуск прослушивания обновлений от сервера через таймер"""
+        # Запускаем таймер для обновлений каждые 20 секунд
+        self.update_timer.start(20000)  # 20 секунд
+        logger.info("Таймер обновлений запущен")
         
     def stop_listen_for_updates(self):
         """Остановка прослушивания обновлений"""
         self.is_authenticated = False
+        if self.update_timer.isActive():
+            self.update_timer.stop()
+            logger.info("Таймер обновлений остановлен")
         
-    def listen_for_updates(self):
-        """Прослушивание обновлений от сервера"""
-        while self.network_client.connected and self.is_authenticated:
-            try:
-                # Получаем список пользователей
-                users = self.network_client.get_user_list()
-                if users is not None:
-                    self.sig_user_list_updated.emit(users)
-                
-                time.sleep(20)
+    def on_update_timer(self):
+        """Обработчик таймера обновлений - безопасно работает в главном потоке"""
+        if not self.is_authenticated or not self.network_client.connected:
+            self.update_timer.stop()
+            return
             
-            except Exception as e:
-                error_msg = str(e)
-                if "Не авторизован" in error_msg or "authorized" in error_msg.lower():
-                    self.is_authenticated = False
-                    self.system_chat.append("❌ Ошибка авторизации. Требуется повторный вход.")
-                    break
-                else:
-                    self.system_chat.append(f"⚠️ Ошибка получения обновлений: {e}")
-                time.sleep(20)
+        try:
+            # Получаем список пользователей
+            users = self.network_client.get_user_list()
+            if users is not None:
+                self.sig_user_list_updated.emit(users)
+                
+        except Exception as e:
+            error_msg = str(e)
+            if "Не авторизован" in error_msg or "authorized" in error_msg.lower():
+                self.is_authenticated = False
+                self.system_chat.append("❌ Ошибка авторизации. Требуется повторный вход.")
+                self.update_timer.stop()
+            else:
+                self.system_chat.append(f"⚠️ Ошибка получения обновлений: {e}")
         
     def refresh_user_list(self):
         """Обновление списка пользователей"""
@@ -543,37 +572,6 @@ class SecureMainWindow(QMainWindow):
         elif status == "error":
             self.system_chat.append(f"⚠️ Ошибка: {details}")
             
-    def start_call_server_listener(self, call_id):
-        """Запуск прослушивания входящих медиа-соединений"""
-        import threading
-    
-        def listener():
-            try:
-                if call_id in self.network_client.call_sockets:
-                    call_socket = self.network_client.call_sockets[call_id]
-                    if call_socket:
-                        # Принимаем входящее соединение
-                        client_socket, addr = call_socket.accept()
-                        self.network_client.call_sockets[call_id] = client_socket
-                    
-                        # Настраиваем сокет в окне звонка
-                        if call_id in self.active_calls:
-                            self.active_calls[call_id]['window'].call_socket = client_socket
-                        
-                            # Запускаем реальные аудио потоки
-                            self.active_calls[call_id]['window'].initialize_real_audio_streams()
-                            self.active_calls[call_id]['window'].start_audio_receiver()
-                        
-                            logger.info(f"Медиа соединение установлено с {addr}")
-                            self.system_chat.append(f"✅ Аудио соединение установлено")
-                    
-            except Exception as e:
-                logger.error(f"Ошибка в медиа-сервере для звонка {call_id}: {e}")
-    
-        # Запускаем прослушивание в отдельном потоке
-        thread = threading.Thread(target=listener, daemon=True)
-        thread.start()
-    # Методы для работы со звонками
     def start_call(self, username, call_type):
         """Начать звонок с пользователем"""
         logger.info(f"SecureMainWindow.start_call: Начало {call_type} звонка с {username}")
@@ -589,7 +587,7 @@ class SecureMainWindow(QMainWindow):
         call_window.call_ended.connect(self.end_call)
         call_window.show()
         
-        # Сохраняем информацию о звонке
+        # Сохраняем информацию о звонке - ИСПРАВЛЕННАЯ СТРОКА
         self.active_calls[call_id] = {
             'window': call_window,
             'username': username,
@@ -603,8 +601,12 @@ class SecureMainWindow(QMainWindow):
         
     def handle_call(self, action, from_user, call_type=None, call_id=None):
         """Обработка входящего звонка"""
-        logger.info(f"SecureMainWindow.handle_call: Обработка звонка: {action} от {from_user}")
+        logger.info(f"SecureMainWindow.handle_call: Обработка звонка: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
         
+
+        # ДИАГНОСТИКА: сразу показываем в системном чате
+        self.system_chat.append(f"🔊 Сигнал звонка: {action} от {from_user}")
+
         if action == 'incoming_call':
             # Входящий звонок
             self.handle_incoming_call_request(from_user, call_type, call_id)
@@ -623,16 +625,22 @@ class SecureMainWindow(QMainWindow):
             
         elif action == 'call_info':
             # Информация о звонке
-            self.handle_call_info(from_user, call_id, call_port)
+            self.handle_call_info(from_user, call_id)
+
+        else:
+            logger.warning(f"🔊 Неизвестное действие звонка: {action}")
             
     def handle_incoming_call_request(self, from_user, call_type, call_id):
-        """Обработка входящего запроса на звонок"""
+        """Обработка входящего запроса на звонка"""
         # ПРОВЕРКА НА ДУБЛИРУЮЩИЕСЯ ЗВОНКИ
         if call_id in self.active_calls:
             logger.warning(f"Дублирующий запрос на звонок {call_id}, игнорируем")
             return
 
         logger.info(f"Обработка входящего звонка от {from_user}, тип: {call_type}")
+
+        # ДИАГНОСТИКА: выводим в системный чат
+        self.system_chat.append(f"🔊 ВХОДЯЩИЙ ЗВОНОК от {from_user}, тип: {call_type}")
 
         # Показываем уведомление
         self.show_notification(
@@ -641,57 +649,71 @@ class SecureMainWindow(QMainWindow):
         )
         
         # Создаем окно звонка
-        call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
-        call_window.call_ended.connect(self.end_call)
-        call_window.call_accepted.connect(self.accept_call)
-        call_window.call_rejected.connect(self.reject_call)
-        call_window.show()
+        try:
+            call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
+            call_window.call_ended.connect(self.end_call)
+            call_window.call_accepted.connect(self.accept_call)
+            call_window.call_rejected.connect(self.reject_call)
+            
+            # Сохраняем информацию о звонке
+            self.active_calls[call_id] = {
+                'window': call_window,
+                'username': from_user,
+                'type': call_type,
+                'outgoing': False
+            }
+
+            # ПОКАЗЫВАЕМ ОКНО ЯВНО
+            call_window.show()
+            call_window.raise_()  # Поднимаем на передний план
+            call_window.activateWindow()  # Активируем
         
-        # Сохраняем информацию о звонке
-        self.active_calls[call_id] = {
-            'window': call_window,
-            'username': from_user,
-            'type': call_type,
-            'outgoing': False
-        }
+            logger.info(f"🔊 Окно звонка показано и активировано")
         
-        self.system_chat.append(f"📞 Входящий {call_type} звонок от {from_user}")
-        logger.info(f"Создано окно звонка для {call_id}")
+            self.system_chat.append(f"📞 Входящий {call_type} звонок от {from_user}")
+            logger.info(f"Создано окно звонка для {call_id}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания окна звонка: {e}")
+            self.system_chat.append(f"❌ Ошибка создания окна звонка: {e}")
         
-    def handle_call_accepted(self, from_user, call_id, call_port):
-        """Обработка принятия звонка"""
-        logger.info(f"SecureMainWindow.handle_call_accepted: Звонок принят пользователем {from_user}")
+        
+    def handle_call_accepted(self, from_user, call_id, call_port=None):
+        """Обработка принятия звонка другим пользователем"""
+        self.logger.info(f"🔊 Звонок принят пользователем {from_user}, порт: {call_port}")
         
         if call_id in self.active_calls:
             call_info = self.active_calls[call_id]
-            call_window = call_info['window']
             
-            # Если это исходящий звонок, подключаемся к медиа-серверу
-            if call_info['outgoing']:
-                # Получаем информацию о пользователе для подключения
-                if from_user in self.network_client.clients_info:
-                    user_info = self.network_client.clients_info[from_user]
-                    host = user_info.get('external_ip', 'localhost')
-                    port = call_port
-
-                    # Подключаемся к медиа-серверу
-                    if self.network_client.connect_to_call_server(host, port, call_id):
-                        # Настраиваем сокет в окне звонка
-                        call_window.call_socket = self.network_client.call_sockets[call_id]
-                        # Запускаем реальные аудио потоки
-                        call_window.initialize_real_audio_streams()
-                        call_window.start_audio_receiver()
+            # ПОДКЛЮЧАЕМСЯ К МЕДИА-СЕРВЕРУ ПОЛЬЗОВАТЕЛЯ
+            if call_port and call_port > 0:
+                # Используем localhost для тестирования
+                host = 'localhost' 
+                
+                self.logger.info(f"🔊 Подключение к медиа-серверу {from_user} на {host}:{call_port}")
+                
+                if self.network_client.connect_to_call_server(host, call_port, call_id):
+                    # Настраиваем сокет в окне звонка
+                    call_info['window'].call_socket = self.network_client.call_sockets[call_id]
                     
-                        self.system_chat.append(f"✅ Аудио соединение установлено с {from_user}")
-                    else:
-                        self.system_chat.append(f"⚠️ Не удалось установить аудио соединение с {from_user}")
+                    # Запускаем реальные аудио потоки
+                    call_info['window'].initialize_real_audio_streams()
+                    call_info['window'].start_audio_receiver()
+                    
+                    self.logger.info("✅ Аудио соединение установлено")
+                    self.system_chat.append(f"✅ Аудио соединение с {from_user} установлено")
+                else:
+                    self.logger.error("❌ Не удалось установить аудио соединение")
+                    self.system_chat.append(f"⚠️ Не удалось установить аудио соединение с {from_user}")
+            else:
+                self.logger.warning("⚠️ Порт медиа-сервера не указан, продолжаем без аудио")
+                self.system_chat.append(f"⚠️ Звонок с {from_user} продолжается без аудио")
 
-            # Запускаем звонок в UI
-            call_window.start_call()
-        
+            # Запускаем звонок в UI в любом случае
+            call_info['window'].start_call()
             self.system_chat.append(f"✅ Пользователь {from_user} принял звонок")
         else:
-            logger.warning(f"Звонок {call_id} не найден в активных звонках")
+            self.logger.warning(f"Звонок {call_id} не найден в активных звонках")
         
     def handle_call_rejected(self, from_user, call_id):
         """Обработка отклонения звонка"""
@@ -728,67 +750,100 @@ class SecureMainWindow(QMainWindow):
         else:
             logger.info(f"Звонок {call_id} уже удален из активных")
             
-    def handle_call_info(self, from_user, call_id, call_port):
+    def handle_call_info(self, from_user, call_id):
         """Обработка информации о звонке"""
-        logger.info(f"SecureMainWindow.handle_call_info: Информация о звонке от {from_user}, порт: {call_port}")
-        
-        # Здесь должна быть логика обработки информации о медиа-соединении
-        # Например, подключение к указанному порту
+        logger.info(f"SecureMainWindow.handle_call_info: Информация о звонке от {from_user}")
         
     def accept_call(self, call_id):
-        """Принять входящий звонок - МАКСИМАЛЬНО УПРОЩЕННАЯ ВЕРСИЯ"""
+        """Принять входящий звонок - ПРОСТАЯ И НАДЕЖНАЯ ВЕРСИЯ"""
         try:
             logger.info(f"=== ПОПЫТКА ПРИНЯТЬ ЗВОНОК {call_id} ===")
-        
+    
             if call_id not in self.active_calls:
                 logger.error(f"❌ Звонок {call_id} не найден в active_calls")
+                logger.error(f"❌ Доступные звонки: {list(self.active_calls.keys())}")
                 return
-            
+        
             call_info = self.active_calls[call_id]
             username = call_info['username']
+            logger.info(f"🔍 Информация о звонке: {call_info}")
 
-            # ПРОСТАЯ ПРОВЕРКА СОЕДИНЕНИЯ
-            if not self.network_client.connected:
-                logger.warning("⚠️ Нет соединения с сервером, пытаемся переподключиться...")
-                if not self.network_client.reconnect():
-                    logger.error("❌ Не удалось восстановить соединение")
-                    QMessageBox.warning(self, 'Ошибка', 'Нет соединения с сервером')
-                    return
+            # 1. Запускаем медиа-сервер
+            logger.info("🔊 Запуск медиа-сервера...")
+            call_port = self.network_client.start_call_server(call_id, port=0)
+            if not call_port:
+                logger.error("❌ Не удалось запустить медиа-сервер")
+                self.system_chat.append("❌ Не удалось запустить медиа-сервер")
+                return
 
-            # Запускаем медиа-сервер
-            call_port = None
-            try:
-                call_port = self.network_client.start_call_server(call_id)
-                if call_port:
-                    logger.info(f"🔊 Медиа-сервер запущен на порту: {call_port}")
-                else:
-                    logger.warning("⚠️ Не удалось запустить медиа-сервер, продолжаем без него")
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка запуска медиа-сервера: {e}")
-                # Продолжаем без медиа-сервера
+            logger.info(f"🔊 Медиа-сервер запущен на порту: {call_port}")
+
+            
+
+            logger.info("✅ Подтверждение отправлено успешно")
 
             # Отправляем подтверждение
-            logger.info("🔄 Отправка подтверждения на сервер...")
+            logger.info(f"📤 Отправка подтверждения на сервер с портом {call_port}...")
             if self.network_client.send_call_answer(call_id, 'accept', call_port):
                 logger.info("✅ Подтверждение отправлено успешно")
         
-                # Запускаем звонок в UI
-                call_info['window'].accept_call()
-                self.system_chat.append(f"✅ Вы приняли звонок от {username}")
+            # 3. Запускаем ожидание медиа-соединения в отдельном потоке
+            def wait_for_connection():
+                logger.info(f"🔊 Ожидание медиа-соединения для звонка {call_id}...")
+            
+                # Ждем соединения
+                if self.network_client.accept_call_connection(call_id, timeout=30):
+                    logger.info(f"✅ Медиа-соединение для звонка {call_id} установлено")
+                
+                    # Устанавливаем сокет в окне звонка
+                    if call_id in self.network_client.call_sockets:
+                        logger.error(f"❌ Сокет для звонка {call_id} не создан")
+                        return
+
+                        call_socket = self.network_client.call_sockets[call_id]
+                        logger.info(f"🔍 Сокет звонка: {call_socket}, тип: {type(call_socket)}")
+
+                        success = self.network_client.accept_call_connection(call_id)
+                        if success:
+                            logger.info(f"✅ Медиа-соединение для звонка {call_id} установлено")
+
+                            
+                            # Настраиваем сокет в окне звонка
+                            if call_id in self.network_client.call_sockets:
+                                call_info['window'].call_socket = self.network_client.call_sockets[call_id]
+                                logger.info(f"🔍 Сокет установлен в окне звонка: {call_info['window'].call_socket}")             
+                        
+                                # Запускаем аудио
+                                try:
+                                    call_info['window'].initialize_real_audio_streams()
+                                    call_info['window'].start_audio_receiver()
+                                    logger.info("✅ Аудио потоки запущены")
+                                except Exception as e:
+                                    logger.error(f"❌ Ошибка запуска аудио: {e}")
+                            else:
+                                logger.error("❌ Сокет звонка не найден после установки соединения")
+                        else:
+                            logger.error(f"❌ Не удалось установить медиа-соединение для звонка {call_id}")
+                            self.system_chat.append("⚠️ Аудио соединение не установлено, но звонок продолжается")
+                                
+                    # Запускаем в отдельном потоке
+                    media_thread = threading.Thread(target=wait_for_connection, daemon=True)
+                    media_thread.start()
         
-                # Если есть порт, запускаем прослушивание
-                if call_port:
-                    self.start_call_server_listener(call_id)
-            else:
-                logger.error("❌ Не удалось отправить подтверждение")
-                QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить подтверждение звонка')
-        
+                    # Запускаем звонок в UI
+                    call_info['window'].accept_call()
+                    self.system_chat.append(f"✅ Вы приняли звонок от {username}")
+                    logger.info("✅ Звонок принят в UI")
+                else:
+                    logger.error("❌ Не удалось отправить подтверждение")
+                    self.system_chat.append("❌ Не удалось отправить подтверждение звонка")
+    
         except Exception as e:
             logger.error(f"❌ Критическая ошибка в accept_call: {e}")
             import traceback
             logger.error(f"Трассировка: {traceback.format_exc()}")
-                    
-    
+
+
     def reject_call(self, call_id):
         """Отклонить входящий звонок"""
         if call_id in self.active_calls:
@@ -806,50 +861,42 @@ class SecureMainWindow(QMainWindow):
                 
     def end_call(self, call_id):
         """Завершить активный звонок"""
-        if call_id not in self.active_calls:  # ✅ ИСПРАВЛЕНА ПРОВЕРКА
-            logger.info(f"Попытка завершить несуществующий звонок {call_id}")
-            return
+        try:
+            if call_id not in self.active_calls:
+                logger.info(f"Попытка завершить несуществующий звонок {call_id}")
+                return
             
-        call_info = self.active_calls[call_id]
-        username = call_info['username']
+            call_info = self.active_calls[call_id]
+            username = call_info['username']
             
-        # Отправляем сообщение о завершении
-        success = self.network_client.send_call_end(call_id)
+            # ✅ ПЕРВОЕ ДЕЛО - ОСТАНАВЛИВАЕМ UI
+            if 'window' in call_info and call_info['window']:
+                try:
+                    # Используем отложенное закрытие для безопасности
+                    call_info['window'].hide()
+                    call_info['window'].deleteLater()
+                except Exception as e:
+                    logger.error(f"Ошибка закрытия окна звонка: {e}")
 
-        if not success:
-            logger.warning(f"Не удалось отправить сообщение о завершении звонка {call_id}")
+            # Отправляем сообщение о завершении
+            success = self.network_client.send_call_end(call_id)
+            if not success:
+                logger.warning(f"Не удалось отправить сообщение о завершении звонка {call_id}")
 
-        # Останавливаем медиа-ресурсы
-        self.network_client.stop_call(call_id)
+            # Останавливаем медиа-ресурсы
+            self.network_client.stop_call(call_id)
             
-        # Закрываем окно звонка
-        if 'window' in call_info:
-            call_info['window'].close()
             
-        # Удаляем из активных звонков
-        if call_id in self.active_calls:
-            del self.active_calls[call_id]
             
-        self.system_chat.append(f"📞 Вы завершили звонок с {username}")
+            # Удаляем из активных звонков
+            if call_id in self.active_calls:
+                del self.active_calls[call_id]
+            
+            self.system_chat.append(f"📞 Вы завершили звонок с {username}")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка завершения звонка {call_id}: {e}")
  
-    def check_connection(self): 
-        """Проверка состояния соединения"""
-        self.logger.info("=== ПРОВЕРКА СОЕДИНЕНИЯ ===")
-        self.logger.info(f"connected: {self.connected}")
-        self.logger.info(f"server_socket: {self.server_socket}")
-        self.logger.info(f"session_token: {'Есть' if self.session_token else 'Нет'}")
-        self.logger.info(f"cipher_suite: {'Есть' if self.cipher_suite else 'Нет'}")
-    
-        if self.connected and self.server_socket:
-            try:
-                # Простая проверка "ping"
-                test_data = {'type': 'heartbeat', 'session_token': self.session_token}
-                return self.send_encrypted_message(test_data)
-            except:
-                return False
-        return False
-
-
     def update_user_list(self, users):
         """Обновление списка пользователей"""
         logger.info(f"SecureMainWindow.update_user_list: Обновление списка пользователей: {len(users) if users else 0} пользователей")
@@ -881,7 +928,7 @@ class SecureMainWindow(QMainWindow):
             
     def closeEvent(self, event):
         """Обработка закрытия приложения"""
-        # Закрываем все активные уведомления
+        # Завершаем все активные уведомления
         for notification in self.active_notifications:
             notification.close()
             
@@ -891,6 +938,31 @@ class SecureMainWindow(QMainWindow):
             
         self.disconnect_from_server()
         event.accept()
+
+    # Безопасные методы для межпоточного общения
+    def on_system_message(self, message):
+        """Обработчик системных сообщений в главном потоке"""
+        self.system_chat.append(message)
+
+    def on_call_status(self, call_id, action):
+        """Обработчик статусов звонков в главном потоке"""
+        if call_id not in self.active_calls:
+            return
+            
+        call_info = self.active_calls[call_id]
+        call_window = call_info['window']
+        
+        if action == "accept_call":
+            call_window.accept_call()
+        elif action == "start_call":
+            call_window.start_call()
+        elif action == "setup_audio":
+            # Настройка аудио в главном потоке
+            if call_id in self.network_client.call_sockets:
+                call_window.call_socket = self.network_client.call_sockets[call_id]
+                call_window.initialize_real_audio_streams()
+                call_window.start_audio_receiver()
+                self.system_chat.append("✅ Аудио соединение установлено")
 
 class DialogApplication:
     """Класс управления приложением - запускает аутентификацию, затем главное окно"""
