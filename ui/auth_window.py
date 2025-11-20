@@ -11,9 +11,10 @@ logger = logging.getLogger('dialog_gui')
 class RegistrationWindow(QDialog):
     registration_success = pyqtSignal(str)
     
-    def __init__(self, network_client, parent=None):
+    def __init__(self, network_client, auth_manager, parent=None):
         super().__init__(parent)
         self.network_client = network_client
+        self.auth_manager = auth_manager
         self.init_ui()
         
     def init_ui(self):
@@ -127,7 +128,7 @@ class RegistrationWindow(QDialog):
         email = self.email_edit.text().strip()
         password = self.password_edit.text()
         
-        if not self.network_client.connected:
+        if not self.network_client.is_running:
             QMessageBox.warning(self, 'Ошибка', 'Нет подключения к серверу')
             return
             
@@ -138,13 +139,13 @@ class RegistrationWindow(QDialog):
         self.register_btn.setText("Регистрация...")
         
         try:
-            if self.network_client.register(username, password, email):
+            result = self.auth_manager.register(username, password, email)
+            if result['success']:
                 QMessageBox.information(self, 'Успех', 'Регистрация прошла успешно! Теперь вы можете войти в систему.')
                 self.registration_success.emit(username)
                 self.accept()
             else:
-                error_msg = getattr(self.network_client, 'last_error', 'Неизвестная ошибка')
-                QMessageBox.critical(self, 'Ошибка', f'Ошибка регистрации: {error_msg}')
+                QMessageBox.critical(self, 'Ошибка', f'Ошибка регистрации: {result["error"]}')
         except Exception as e:
             logger.error(f"Ошибка при регистрации: {e}")
             QMessageBox.critical(self, 'Ошибка', f'Ошибка регистрации: {str(e)}')
@@ -161,9 +162,10 @@ class RegistrationWindow(QDialog):
 class AuthWindow(QDialog):
     login_success = pyqtSignal(str)
     
-    def __init__(self, network_client, parent=None):
+    def __init__(self, network_client, auth_manager, parent=None):
         super().__init__(parent)
         self.network_client = network_client
+        self.auth_manager = auth_manager
         self.init_ui()
         
     def init_ui(self):
@@ -260,11 +262,12 @@ class AuthWindow(QDialog):
         self.status_label.setText("Проверка учетных данных...")
         
         try:
-            if self.network_client.login(username, password):
+            result = self.auth_manager.login(username, password)
+            if result['success']:
                 self.login_success.emit(username)
                 self.accept()
             else:
-                error_msg = getattr(self.network_client, 'last_error', 'Неверные данные для входа или проблема с сервером')
+                error_msg = result.get('error', 'Неверные данные для входа или проблема с сервером')
                 QMessageBox.critical(self, 'Ошибка', error_msg)
                 self.status_label.setText("Ошибка аутентификации")
         finally:
@@ -277,7 +280,7 @@ class AuthWindow(QDialog):
 
     def show_registration(self):
         """Показать окно регистрации"""
-        registration_window = RegistrationWindow(self.network_client, self)
+        registration_window = RegistrationWindow(self.network_client, self.auth_manager, self)
         registration_window.registration_success.connect(self.on_registration_success)
         registration_window.exec_()
         

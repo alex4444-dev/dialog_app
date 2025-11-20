@@ -1,0 +1,19 @@
+network:
+  min_port: 9000
+  max_port: 10000
+  max_port_attempts: 100
+  bootstrap_nodes:
+    - {"host": "localhost", "port": 9000}
+  connection_timeout: 30
+
+database:
+  path: "./data/client.db"
+  backup_interval: 3600
+
+security:
+  key_storage: "./data/keys/"
+  session_duration: 86400
+
+logging:
+  level: "INFO"
+  file: "./logs/client.log"
