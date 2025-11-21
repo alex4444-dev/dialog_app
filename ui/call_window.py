@@ -26,6 +26,15 @@ class CallWindow(QWidget):
         self.call_id = call_id
         self.is_outgoing = is_outgoing
 
+        # Подключаем сигналы КОРРЕКТНО
+        if not is_outgoing:
+            # Для входящих звонков - подключаем сигналы принятия/отклонения
+            self.call_accepted.connect(self.accept_call)
+            self.call_rejected.connect(self.reject_call)
+        
+        # Сигнал завершения звонка всегда подключен
+        self.call_ended.connect(self.end_call)
+
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
 
         self.is_active = False

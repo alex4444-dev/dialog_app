@@ -69,7 +69,9 @@ class P2PMainWindow(QMainWindow):
         self.active_notifications = []
         self.peers_data = {}
         self.logger = logging.getLogger('dialog_gui')
-        
+        # Для медиа-соединений звонков
+        self.media_connections = {}
+
         # Для звонков
         self.active_calls = {}
         self.pending_calls = {}
@@ -704,11 +706,11 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.on_unread_count_changed: Ошибка: {e}")
 
     def on_call_requested(self, username, call_type):
-        """Обработчик запроса звонка"""
+        """Обработчик запроса звонка из чата"""
         try:
             logger.info(f"P2PMainWindow.on_call_requested: Запрос {call_type} звонка для {username}")
-            # Здесь должна быть логика инициализации звонка
-            # Например: self.p2p_client.start_call(username, call_type)
+            # Вызываем метод начала звонка
+            self.start_call(username, call_type)
         except Exception as e:
             logger.error(f"P2PMainWindow.on_call_requested: Ошибка запроса звонка: {e}")
 
