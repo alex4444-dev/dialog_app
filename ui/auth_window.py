@@ -18,7 +18,7 @@ class RegistrationWindow(QDialog):
         self.init_ui()
         
     def init_ui(self):
-        self.setWindowTitle('Регистрация - Диалог')
+        self.setWindowTitle('Регистрация - ДИАЛОГ')
         self.setFixedSize(450, 500)
         self.setStyleSheet(AUTH_DIALOG_STYLE + REGISTER_STYLE_EXTRA)
         
@@ -169,7 +169,7 @@ class AuthWindow(QDialog):
         self.init_ui()
         
     def init_ui(self):
-        self.setWindowTitle('Вход в Диалог')
+        self.setWindowTitle('Вход в ДИАЛОГ')
         self.setFixedSize(450, 500)
         self.setStyleSheet(AUTH_DIALOG_STYLE + LOGIN_STYLE_EXTRA)
         

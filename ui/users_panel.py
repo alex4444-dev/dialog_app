@@ -24,7 +24,7 @@ class UsersPanel(QWidget):
         layout.setSpacing(12)
         
         # Заголовок
-        title = QLabel("Пользователи онлайн")
+        title = QLabel("Пользователи в сети")
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("""
             font-size: 16px; 
@@ -73,18 +73,7 @@ class UsersPanel(QWidget):
         
         # Панель управления сетью
         network_layout = QHBoxLayout()
-        
-        self.add_peer_btn = QPushButton("➕ Добавить пир")
-        self.add_peer_btn.setToolTip("Добавить узел вручную")
-        self.add_peer_btn.clicked.connect(self.add_peer_manually)
-        
-        self.disconnect_btn = QPushButton("🔌 Отключить")
-        self.disconnect_btn.setToolTip("Отключиться от выбранного пира")
-        self.disconnect_btn.clicked.connect(self.disconnect_from_peer)
-        
-        network_layout.addWidget(self.add_peer_btn)
-        network_layout.addWidget(self.disconnect_btn)
-        
+
         layout.addLayout(network_layout)
         
         # Кнопка обновления

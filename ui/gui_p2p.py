@@ -100,7 +100,7 @@ class P2PMainWindow(QMainWindow):
     
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
-        self.setWindowTitle(f'💬 Диалог - P2P Мессенджер (Пользователь: {self.username})')
+        self.setWindowTitle(f'💬 Коммуникационная платформа - ДИАЛОГ (Пользователь: {self.username})')
         self.setGeometry(100, 100, 1000, 700)
         self.setStyleSheet(MAIN_WINDOW_STYLE)
         
@@ -143,12 +143,12 @@ class P2PMainWindow(QMainWindow):
         self.create_menu()
         
         # Статус бар
-        self.statusBar().showMessage(f'✅ P2P сеть: Подключено как {self.username}')
+        self.statusBar().showMessage(f'✅ В сети: Подключено как {self.username}')
         
         # Создаем системный трей
         self.setup_system_tray()
         
-        # Запускаем работу P2P мессенджера с задержкой
+        # Запускаем работу ком. платформы ДИАЛОГ с задержкой
         QTimer.singleShot(1000, self.start_p2p_messaging)
         
         logger.info("P2P интерфейс инициализирован")

@@ -1429,40 +1429,7 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Ошибка отправки ответа на звонок: {e}")
             return False
 
-    def setup_media_connection(self, call_id: str, peer_username: str) -> bool:
-        """Установка медиа-соединения для звонка"""
-        try:
-            logger.info(f"🔊 setup_media_connection заглушка: call_id={call_id}, peer={peer_username}")
-            
-            # Создаем отдельный сокет для медиа-данных
-            media_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            media_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-
-            # Находим свободный порт для медиа
-            media_port = find_free_port(9000)
-            if not media_port:
-                logger.error("❌ Не удалось найти свободный порт для медиа")
-                return False
-
-            media_socket.bind(('0.0.0.0', media_port))
-            media_socket.listen(1)
-            media_socket.settimeout(10.0)
-
-            # Сохраняем информацию о медиа-соединении
-            self.media_connections[call_id] = {
-                'socket': media_socket,
-                'port': media_port,
-                'peer_username': peer_username,
-                'status': 'listening'
-            }
-                
-            logger.info(f"✅ Медиа-сокет создан на порту {media_port} для звонка {call_id}")
-            return True
-        
-        except Exception as e:
-            logger.error(f"❌ Ошибка создания медиа-соединения: {e}")
-            return False
-
+    
     def _handle_call_request(self, data: dict):
         """Обработка входящего запроса на звонок"""
         try:
@@ -1505,8 +1472,8 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"❌ Ошибка обработки ответа на звонок: {e}")
 
-    def get_media_socket(self, call_id: str):
-        """Получение медиа-сокета для звонка"""
+    def setup_media_connection(self, call_id: str, peer_username: str) -> bool:
+        """Установка медиа-соединения для звонка - ВРЕМЕННАЯ ЗАГЛУШКА"""
         try:
             logger.info(f"🔊 setup_media_connection заглушка: call_id={call_id}, peer={peer_username}")
             
@@ -1534,10 +1501,25 @@ class P2PNetworkClient(QObject):
                 
             logger.info(f"✅ Медиа-сокет создан на порту {media_port} для звонка {call_id}")
             return True
+        
         except Exception as e:
             logger.error(f"❌ Ошибка создания медиа-соединения: {e}")
             return False
 
+    def get_media_socket(self, call_id: str):
+        """Получение медиа-сокета для звонка - ВРЕМЕННАЯ ЗАГЛУШКА"""
+        try:
+            if call_id in self.media_connections:
+                media_info = self.media_connections[call_id]
+                return media_info['socket']
+            else:
+                logger.warning(f"⚠️ Медиа-соединение для звонка {call_id} не найдено")
+            return None
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения медиа-сокета: {e}")
+            return None
+
+    
     def close_media_connection(self, call_id: str):
         """Закрытие медиа-соединения для звонка"""
         logger.info(f"🔊 close_media_connection: call_id={call_id}")

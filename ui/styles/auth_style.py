@@ -25,14 +25,14 @@ AUTH_DIALOG_STYLE = """
     QLabel#status {
         background-color: rgba(255, 255, 255, 0.1);
         border-radius: 5px;
-        padding: 8px;
+        padding: 5px;
         margin: 5px;
     }
     QLineEdit {
         background-color: rgba(255, 255, 255, 0.9);
         border: 2px solid rgba(255, 255, 255, 0.3);
         border-radius: 8px;
-        padding: 12px;
+        padding: 8px;
         font-size: 14px;
         color: #333;
         margin: 5px;
