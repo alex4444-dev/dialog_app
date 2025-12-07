@@ -55,22 +55,6 @@ class UsersPanel(QWidget):
         self.users_list.customContextMenuRequested.connect(self.show_context_menu)
         layout.addWidget(self.users_list)
         
-        # Кнопки звонков
-        call_buttons_layout = QHBoxLayout()
-        
-        self.audio_call_btn = QPushButton("📞 Аудио")
-        self.audio_call_btn.setToolTip("Начать аудио звонок")
-        self.audio_call_btn.clicked.connect(self.start_audio_call)
-        
-        self.video_call_btn = QPushButton("📹 Видео")
-        self.video_call_btn.setToolTip("Начать видео звонок")
-        self.video_call_btn.clicked.connect(self.start_video_call)
-        
-        call_buttons_layout.addWidget(self.audio_call_btn)
-        call_buttons_layout.addWidget(self.video_call_btn)
-        
-        layout.addLayout(call_buttons_layout)
-        
         # Панель управления сетью
         network_layout = QHBoxLayout()
 

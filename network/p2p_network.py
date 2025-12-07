@@ -99,6 +99,65 @@ class P2PNetworkClient(QObject):
         self.retry_thread = threading.Thread(target=self._retry_messages_loop, daemon=True)
         self.retry_thread.start()  
 
+        # ДЛЯ МЕДИА-СОЕДИНЕНИЙ
+        self.media_server_host = 'localhost'
+        self.media_server_port = 9100
+        self.media_sockets = {}  # call_id -> socket
+        self.media_connections = {}  # call_id -> media_info
+        self.call_requests = {}  # call_id -> call_info
+        
+        # Запускаем поток для повторной отправки
+        self.retry_thread = threading.Thread(target=self._retry_messages_loop, daemon=True)
+        self.retry_thread.start()
+
+    
+    
+    def connect_to_peer_media(self, call_id, peer_username):
+        """Подключение к медиа другого пользователя через центральный сервер"""
+        try:
+            logger.info(f"🔊 Подключение к медиа пользователя {peer_username} для звонка {call_id}")
+            
+            # Создаем сокет
+            media_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            media_socket.settimeout(10.0)
+            
+            try:
+                media_socket.connect((self.media_server_host, self.media_server_port))
+                media_socket.settimeout(30.0)
+                
+                # Запрашиваем соединение с другим пользователем
+                connect_data = {
+                    'call_id': call_id,
+                    'action': 'connect',
+                    'username': self.username,
+                    'peer_username': peer_username
+                }
+                media_socket.send(json.dumps(connect_data).encode())
+                
+                # Ждем ответа
+                response = media_socket.recv(1024)
+                if response:
+                    resp_data = json.loads(response.decode())
+                    if resp_data.get('status') in ['connected', 'waiting']:
+                        logger.info(f"✅ Подключение к медиа установлено: {resp_data['status']}")
+                        
+                        # Сохраняем сокет
+                        self.media_sockets[call_id] = media_socket
+                        return True
+                
+            except ConnectionRefusedError:
+                logger.error(f"❌ Не удалось подключиться к медиа-серверу")
+                media_socket.close()
+                return False
+            except Exception as e:
+                logger.error(f"❌ Ошибка подключения к медиа-серверу: {e}")
+                media_socket.close()
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка подключения к медиа: {e}")
+            return False
+
     def _retry_messages_loop(self):
         """Цикл повторной отправки неподтвержденных сообщений"""
         while self.is_running:
@@ -951,6 +1010,10 @@ class P2PNetworkClient(QObject):
             self._handle_pong(data, peer_id)
         elif message_type == 'peer_discovery':
             self._handle_peer_discovery(data)
+        elif message_type == 'media_info':
+            self._handle_media_info(data, peer_id)
+        elif message_type == 'media_ack':
+            logger.info(f"✅ Получено подтверждение медиа-соединения для звонка {data.get('call_id')}")
         else:
             logger.warning(f"Неизвестный тип сообщения: {message_type}")
 
@@ -1367,13 +1430,24 @@ class P2PNetworkClient(QObject):
         """Отправка запроса на звонок"""
         try:
             call_id = str(uuid.uuid4())
+
+            # Добавляем информацию о медиа-сервере
+            media_info = {
+                'media_server': 'localhost',  # или ваш сервер
+                'media_port': 9100,
+                'call_id': call_id
+            }
+
+            
+            # Добавляем информацию о медиа-сервере в сообщение
             message = {
                 'type': 'call_request',
                 'call_id': call_id,
                 'from': self.username,
                 'to': to_username,
                 'call_type': call_type,
-                'timestamp': time.time()
+                'timestamp': time.time(),
+                'media_info': media_info
             }
     
             # Ищем пользователя в подключенных пирах
@@ -1392,13 +1466,6 @@ class P2PNetworkClient(QObject):
                     return None
             else:
                 logger.warning(f"⚠️ Пользователь {to_username} не найден в подключенных пирах")
-                # Показываем список доступных пользователей для отладки
-                available_users = []
-                for peer_id, peer_info in list(self.connected_peers.items()):
-                    if peer_info.get('username'):
-                        available_users.append(peer_info['username'])
-            
-                logger.info(f"📋 Доступные пользователи: {available_users}")
                 return None
         
         except Exception as e:
@@ -1434,20 +1501,27 @@ class P2PNetworkClient(QObject):
         """Обработка входящего запроса на звонок"""
         try:
             call_id = data.get('call_id')
-            response = data.get('from')
             from_user = data.get('from')
+            call_type = data.get('call_type')
+            media_info = data.get('media_info', {})
             
-            if call_id and response and from_user:
-                logger.info(f"📞 Ответ на звонок {call_id} от {from_user}: {response}")
+            if call_id and from_user:
+                logger.info(f"📞 Ответ на звонок {call_id} от {from_user}")
             
+                # Сохраняем информацию о звонке
+                self.call_requests[call_id] = {
+                    'from_user': from_user,
+                    'call_type': call_type,
+                    'media_info': media_info,
+                    'status': 'incoming',
+                    'timestamp': time.time()
+                }
+
                 # Отправляем сигнал в GUI
-                if response == 'accept':
-                    self.call_received.emit('call_accepted', from_user, '', call_id)
-                elif response == 'reject':
-                    self.call_received.emit('call_rejected', from_user, '', call_id)
-                elif response == 'end':
-                    self.call_received.emit('call_ended', from_user, '', call_id)
-                    
+                self.call_received.emit('incoming_call', from_user, call_type or 'audio', call_id)
+            else:
+                logger.warning("⚠️ Неполный запрос на звонок")
+        
         except Exception as e:
             logger.error(f"❌ Ошибка обработки запроса на звонок: {e}")
 
@@ -1473,71 +1547,306 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Ошибка обработки ответа на звонок: {e}")
 
     def setup_media_connection(self, call_id: str, peer_username: str) -> bool:
-        """Установка медиа-соединения для звонка - ВРЕМЕННАЯ ЗАГЛУШКА"""
+        """Установка медиа-соединения для звонка через медиа-сервер"""
         try:
-            logger.info(f"🔊 setup_media_connection заглушка: call_id={call_id}, peer={peer_username}")
+            logger.info(f"🔊 Установка медиа-соединения для звонка {call_id} с {peer_username}")
             
-            # Создаем отдельный сокет для медиа-данных
-            media_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            media_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            # Ищем пира по имени пользователя
+            target_peer = None
+            for peer_id, peer_info in list(self.connected_peers.items()):
+                if peer_info.get('username') == peer_username:
+                    target_peer = peer_info
+                    break
+            
+            if not target_peer:
+                logger.error(f"❌ Пир {peer_username} не найден в подключенных")
+                return False
+        
+            # Получаем адрес пира
+            peer_host, peer_port = target_peer['address']
+
+            # Создаем серверный сокет для медиа-данных
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
             # Находим свободный порт для медиа
-            media_port = find_free_port(9000)
+            media_port = self._find_free_media_port()
             if not media_port:
                 logger.error("❌ Не удалось найти свободный порт для медиа")
                 return False
-
-            media_socket.bind(('0.0.0.0', media_port))
-            media_socket.listen(1)
-            media_socket.settimeout(10.0)
+        
+            try:
+                server_socket.bind(('0.0.0.0', media_port))
+                server_socket.listen(1)
+                server_socket.settimeout(10.0)  # Таймаут ожидания подключения
+                
+                logger.info(f"🔊 Медиа-сервер запущен на порту {media_port} для звонка {call_id}")
+            
+            except Exception as e:
+                logger.error(f"❌ Ошибка запуска медиа-сервера: {e}")
+                server_socket.close()
+                return False
 
             # Сохраняем информацию о медиа-соединении
             self.media_connections[call_id] = {
-                'socket': media_socket,
+                'server_socket': server_socket,
                 'port': media_port,
                 'peer_username': peer_username,
-                'status': 'listening'
+                'peer_host': peer_host,
+                'status': 'listening',
+                'client_socket': None,
+                'connected_at': None
             }
+
+            # Отправляем информацию о медиа-порте другому пиру
+            media_info_msg = {
+                'type': 'media_info',
+                'call_id': call_id,
+                'media_port': media_port,
+                'action': 'setup'
+            }
+
+            # Отправляем через существующее соединение
+            success = self._send_to_peer(target_peer, media_info_msg)
+            
+            if success:
+                logger.info(f"✅ Информация о медиа-порте {media_port} отправлена пиру {peer_username}")
+
+                # Запускаем поток для принятия входящего медиа-соединения
+                accept_thread = threading.Thread(
+                    target=self._accept_media_connection,
+                    args=(call_id, server_socket),
+                    daemon=True
+                )
+                accept_thread.start()
                 
-            logger.info(f"✅ Медиа-сокет создан на порту {media_port} для звонка {call_id}")
+                return True
+            else:
+                logger.error(f"❌ Не удалось отправить информацию о медиа-порте")
+                server_socket.close()
+                del self.media_connections[call_id]
+                return False
+ 
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка настройки медиа-соединения: {e}")
+            return False
+           
+    def _handle_media_data(self, call_id: str, media_socket: socket.socket):
+        """Обработка данных от медиа-сервера"""
+        try:
+            logger.info(f"🔊 Начало обработки медиа-данных для звонка {call_id}")
+            
+            while call_id in self.media_sockets and self.is_running:
+                try:
+                    # Читаем данные с таймаутом
+                    media_socket.settimeout(1.0)
+                    data = media_socket.recv(4096)
+                    
+                    if not data:
+                        logger.info(f"🔌 Соединение с медиа-сервером для звонка {call_id} закрыто")
+                        break
+                    
+                    # Для тестирования просто логируем полученные данные
+                    logger.debug(f"📨 Получено {len(data)} байт медиа-данных для звонка {call_id}")
+                    
+                    # В реальном приложении здесь была бы обработка аудио
+                    # Например, добавление в буфер для воспроизведения
+                    
+                except socket.timeout:
+                    continue  # Таймаут - продолжаем
+                except ConnectionResetError:
+                    logger.info(f"🔌 Соединение с медиа-сервером для звонка {call_id} разорвано")
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Ошибка чтения медиа-данных: {e}")
+                    break
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка в обработчике медиа-данных: {e}")
+        finally:
+            # Очищаем соединение
+            self.close_media_connection(call_id)    
+
+    def _accept_media_connection(self, call_id: str, server_socket: socket.socket):
+        """Принятие входящего медиа-соединения"""
+        try:
+            logger.info(f"🔊 Ожидание медиа-подключения для звонка {call_id}...")
+            
+            client_socket, client_addr = server_socket.accept()
+            client_socket.settimeout(30.0)
+            
+            logger.info(f"✅ Медиа-подключение установлено для звонка {call_id} от {client_addr}")
+            
+            # Сохраняем клиентский сокет
+            if call_id in self.media_connections:
+                self.media_connections[call_id]['client_socket'] = client_socket
+                self.media_connections[call_id]['status'] = 'connected'
+                self.media_connections[call_id]['connected_at'] = time.time()
+                self.media_connections[call_id]['client_addr'] = client_addr
+                
+                # Отправляем подтверждение
+                ack_msg = {'type': 'media_ack', 'call_id': call_id, 'status': 'connected'}
+                client_socket.send(json.dumps(ack_msg).encode())
+                
+                logger.info(f"✅ Медиа-соединение для звонка {call_id} полностью установлено")
+            else:
+                logger.warning(f"⚠️ Медиа-соединение {call_id} не найдено, закрываем сокет")
+                client_socket.close()
+                
+        except socket.timeout:
+            logger.warning(f"⚠️ Таймаут ожидания медиа-подключения для звонка {call_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка принятия медиа-соединения: {e}")
+        finally:
+            server_socket.close()
+
+    def connect_to_media(self, call_id: str, media_port: int, peer_host: str) -> bool:
+        """Подключение к медиа-серверу другого пира"""
+        try:
+            logger.info(f"🔊 Подключение к медиа-серверу {peer_host}:{media_port} для звонка {call_id}")
+            
+            # Создаем клиентский сокет
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.settimeout(10.0)
+            
+            try:
+                client_socket.connect((peer_host, media_port))
+                client_socket.settimeout(30.0)
+                
+                logger.info(f"✅ Успешное подключение к медиа-серверу для звонка {call_id}")
+                
+            except ConnectionRefusedError:
+                logger.error(f"❌ Не удалось подключиться к медиа-серверу {peer_host}:{media_port}")
+                client_socket.close()
+                return False
+        
+            # Сохраняем сокет
+            self.media_connections[call_id] = {
+                'client_socket': client_socket,
+                'peer_host': peer_host,
+                'media_port': media_port,
+                'status': 'connected',
+                'connected_at': time.time()
+            }
+        
+            # Ждем подтверждения от сервера
+            try:
+                data = client_socket.recv(1024)
+                if data:
+                    ack = json.loads(data.decode())
+                    if ack.get('type') == 'media_ack' and ack.get('status') == 'connected':
+                        logger.info(f"✅ Получено подтверждение медиа-соединения для звонка {call_id}")
+                        return True
+            except:
+                logger.warning(f"⚠️ Не получено подтверждение медиа-соединения, продолжаем...")
+            
             return True
         
         except Exception as e:
-            logger.error(f"❌ Ошибка создания медиа-соединения: {e}")
+            logger.error(f"❌ Ошибка подключения к медиа-серверу: {e}")
             return False
-
+    
     def get_media_socket(self, call_id: str):
-        """Получение медиа-сокета для звонка - ВРЕМЕННАЯ ЗАГЛУШКА"""
+        """Получение медиа-сокета для звонка"""
         try:
             if call_id in self.media_connections:
                 media_info = self.media_connections[call_id]
-                return media_info['socket']
-            else:
-                logger.warning(f"⚠️ Медиа-соединение для звонка {call_id} не найдено")
+                
+                # Возвращаем клиентский сокет (если мы подключались)
+                if 'client_socket' in media_info and media_info['client_socket']:
+                    socket_obj = media_info['client_socket']
+                    # Проверяем, что сокет еще живой
+                    try:
+                        socket_obj.send(b'')
+                        return socket_obj
+                    except:
+                        logger.warning(f"⚠️ Медиа-сокет для звонка {call_id} мертв")
+                        return None
+                
+                # Или возвращаем серверный сокет (если мы слушали)
+                elif 'server_socket' in media_info and media_info['server_socket']:
+                    logger.info(f"🔊 Возвращаем серверный сокет для звонка {call_id}")
+                    return media_info['server_socket']
+                    
+            logger.warning(f"⚠️ Медиа-соединение для звонка {call_id} не найдено")
             return None
+            
         except Exception as e:
             logger.error(f"❌ Ошибка получения медиа-сокета: {e}")
             return None
 
-    
+    def _find_free_media_port(self):
+        """Найти свободный порт для медиа"""
+        for port in range(9100, 9500):
+            if port not in self.media_ports:
+                try:
+                    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                        s.bind(('0.0.0.0', port))
+                        self.media_ports.add(port)
+                        return port
+                except:
+                    continue
+        return None
+
+    def _handle_media_info(self, data: dict, peer_id: str):
+        """Обработка информации о медиа-соединении"""
+        try:
+            call_id = data.get('call_id')
+            media_port = data.get('media_port')
+            action = data.get('action')
+            
+            if not call_id or not media_port:
+                logger.warning("⚠️ Неполная информация о медиа-соединении")
+                return
+            
+            if action == 'setup':
+                # Получаем информацию о пире
+                if peer_id in self.connected_peers:
+                    peer_info = self.connected_peers[peer_id]
+                    peer_host = peer_info['address'][0]
+                    
+                    logger.info(f"🔊 Получена информация о медиа-порте {media_port} для звонка {call_id}")
+                    
+                    # Сохраняем информацию о медиа-соединении
+                    self.call_requests[call_id] = {
+                        'media_port': media_port,
+                        'peer_host': peer_host,
+                        'peer_id': peer_id,
+                        'status': 'pending'
+                    }
+                    
+                    # Отправляем сигнал в GUI для подключения к медиа
+                    self.call_received.emit('media_info', '', '', call_id)
+                    
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки медиа-информации: {e}")
+
     def close_media_connection(self, call_id: str):
         """Закрытие медиа-соединения для звонка"""
         logger.info(f"🔊 close_media_connection: call_id={call_id}")
         """Закрытие медиа-соединения для звонка"""
         try:
-            if call_id in self.media_connections:
-                media_info = self.media_connections[call_id]
-                media_socket = media_info['socket']
-                
+            if call_id in self.media_sockets:
+                media_socket = self.media_sockets[call_id]
                 if media_socket:
                     try:
-                        media_socket.close()
-                        logger.info(f"🔌 Медиа-сокет для звонка {call_id} закрыт")
-                    
-                    except Exception as e:
-                        logger.debug(f"Ошибка закрытия медиа-сокета: {e}")
+                        # Отправляем сообщение о завершении звонка
+                        end_data = {'call_id': call_id, 'action': 'end'}
+                        media_socket.send(json.dumps(end_data).encode())
+                    except:
+                        pass
 
-                del self.media_connections[call_id]
+                    # Закрываем сокет
+                    media_socket.close()
+                    logger.info(f"🔌 Медиа-соединение для звонка {call_id} закрыто")
+                    if call_id in self.media_connections:
+                        del self.media_connections[call_id]
+                    if call_id in self.call_requests:
+                        del self.call_requests[call_id]
+
+                # Удаляем из словарей
+                del self.media_sockets[call_id]
 
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия медиа-соединения: {e}")
