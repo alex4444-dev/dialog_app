@@ -11,6 +11,7 @@ import threading
 import socket
 import numpy as np
 import traceback
+import json
 
 logger = logging.getLogger('dialog_gui')
 
@@ -74,6 +75,10 @@ class CallWindow(QWidget):
         self.socket_attempts = 0
         self.max_socket_attempts = 3
         
+        # Флаги для отслеживания состояния
+        self.audio_receiver_running = False
+        self.local_mode = False
+        
         # Сначала инициализируем UI
         self.init_ui()
         
@@ -90,6 +95,10 @@ class CallWindow(QWidget):
         self.resize(600, 700)
         self.setWindowFlags(Qt.WindowStaysOnTopHint)
         
+        # УБИРАЕМ ПРОЗРАЧНОСТЬ - устанавливаем полностью непрозрачное окно
+        self.setAttribute(Qt.WA_TranslucentBackground, False)
+        self.setWindowOpacity(1.0)  # 100% непрозрачность
+
         # Главный layout
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
@@ -168,21 +177,21 @@ class CallWindow(QWidget):
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
-        self.audio_status_label.setStyleSheet("font-size: 14px; color: #7f8c8d; margin: 10px 0;")
+        self.audio_status_label.setStyleSheet("font-size: 18px; color: #7f8c8d; margin: 10px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
         
         # Индикатор состояния сокета
         self.socket_status_label = QLabel("🔴 Сокет: не установлен")
         self.socket_status_label.setAlignment(Qt.AlignCenter)
-        self.socket_status_label.setStyleSheet("font-size: 14px; color: #e74c3c; margin: 5px 0;")
+        self.socket_status_label.setStyleSheet("font-size: 18px; color: #e74c3c; margin: 5px 0;")
         self.socket_status_label.setWordWrap(True)
         main_layout.addWidget(self.socket_status_label)
         
         # Диагностическая информация
         self.diagnostic_label = QLabel("Ожидание установки соединения...")
         self.diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c; margin: 5px 0;")
+        self.diagnostic_label.setStyleSheet("font-size: 18px; color: #e74c3c; margin: 5px 0;")
         self.diagnostic_label.setWordWrap(True)
         main_layout.addWidget(self.diagnostic_label)
         
@@ -364,7 +373,7 @@ class CallWindow(QWidget):
         self.socket_check_timer = QTimer()
         self.socket_check_timer.timeout.connect(self.auto_check_socket)
         self.socket_check_timer.start(2000)  # Проверка каждые 2 секунды
-
+    
     def debug_socket_state(self):
         """Расширенная диагностика состояния сокета"""
         try:
@@ -378,6 +387,7 @@ class CallWindow(QWidget):
             logger.info(f"🔌 Сокет установлен: {self.socket_set}")
             logger.info(f"🔌 CallSocket объект: {self.call_socket}")
             logger.info(f"🔌 Попыток установки: {self.socket_attempts}")
+            logger.info(f"🔌 Локальный режим: {self.local_mode}")
             
             # Проверяем родительское окно
             parent_info = "None"
@@ -407,23 +417,26 @@ class CallWindow(QWidget):
                     logger.info(f"🔌 Таймаут: {self.call_socket.gettimeout()}")
                     
                     # Проверяем состояние сокета
+                    original_timeout = self.call_socket.gettimeout()
                     self.call_socket.settimeout(1.0)
                     try:
                         self.call_socket.send(b'')
                         logger.info("✅ Сокет готов к отправке данных")
                     except socket.error as e:
                         logger.error(f"❌ Сокет не готов к отправке: {e}")
+                    finally:
+                        self.call_socket.settimeout(original_timeout)
                     
                     try:
                         peer_addr = self.call_socket.getpeername()
                         logger.info(f"🔌 Адрес подключения: {peer_addr}")
                     except socket.error as e:
-                        logger.error(f"❌ Не удалось получить адрес подключения: {e}")
+                        logger.warning(f"⚠️ Не удалось получить адрес подключения: {e}")
                         
                 except Exception as e:
                     logger.error(f"❌ Ошибка проверки сокета: {e}")
             else:
-                logger.error("❌ Сокет не установлен в CallWindow!")
+                logger.warning("⚠️ Сокет не установлен в CallWindow!")
                 
             # Собираем диагностическую информацию для пользователя
             diagnostic_info = []
@@ -431,6 +444,7 @@ class CallWindow(QWidget):
             diagnostic_info.append(f"Тип: {'исходящий' if self.is_outgoing else 'входящий'}")
             diagnostic_info.append(f"Сокет установлен: {'ДА' if self.call_socket else 'НЕТ'}")
             diagnostic_info.append(f"Попыток установки: {self.socket_attempts}")
+            diagnostic_info.append(f"Локальный режим: {'ДА' if self.local_mode else 'НЕТ'}")
             
             if self.call_socket:
                 diagnostic_info.append("✅ Сокет присутствует")
@@ -455,11 +469,15 @@ class CallWindow(QWidget):
 
     def auto_check_socket(self):
         """Автоматическая проверка и попытка установки сокета"""
-        if self.call_socket or self.socket_set or not self.isVisible():
+        if self.call_socket or self.socket_set or not self.isVisible() or self.local_mode:
             return
             
         if self.socket_attempts >= self.max_socket_attempts:
+            logger.warning(f"⚠️ Достигнут максимум попыток установки сокета ({self.max_socket_attempts})")
             self.socket_check_timer.stop()
+            self.local_mode = True
+            self.socket_status_label.setText("🔇 Локальный режим (сокет недоступен)")
+            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
             return
             
         logger.info(f"🔄 Автопроверка сокета (попытка {self.socket_attempts + 1}/{self.max_socket_attempts})")
@@ -477,74 +495,148 @@ class CallWindow(QWidget):
                         logger.info("✅ Сокет успешно установлен через автопроверку")
                         self.socket_check_timer.stop()
                         return
+                    else:
+                        logger.warning("⚠️ Не удалось установить сокет от родителя")
+                else:
+                    logger.warning("⚠️ Родитель вернул пустой сокет")
             except Exception as e:
                 logger.error(f"❌ Ошибка получения сокета от родителя: {e}")
+        else:
+            logger.warning("⚠️ У родителя нет метода get_call_socket или родитель не установлен")
         
-        # Если это исходящий звонок и сокет еще не установлен, показываем предупреждение
-        if self.is_outgoing and self.socket_attempts == 2:
+        # Если это исходящий звонок и сокет все еще не установлен, показываем предупреждение
+        if self.is_outgoing and self.socket_attempts >= 2:
             logger.warning("⚠️ Сокет все еще не установлен для исходящего звонка")
             self.diagnostic_label.setText("⚠️ Ожидание установки соединения...")
+            self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e67e22;")
 
     def set_call_socket(self, call_socket):
-        """Установка сокета для звонка - ДОЛЖЕН ВЫЗЫВАТЬСЯ ПЕРЕД start_call"""
+        """Установка сокета для звонка"""
         try:
-            logger.info(f"🔧 CallWindow.set_call_socket: попытка установить сокет для звонка {self.call_id}")
+            logger.info(f"🔧 CallWindow.set_call_socket: Установка сокета для звонка {self.call_id}")
             
-            # Детальная диагностика полученного сокета
             if call_socket is None:
-                logger.error(f"❌ Попытка установить ПУСТОЙ сокет для звонка {self.call_id}")
-                self.socket_status_label.setText("🔴 Сокет: ошибка (пустой)")
+                logger.warning(f"⚠️ Попытка установить ПУСТОЙ сокет для звонка {self.call_id}")
+                self.socket_status_label.setText("🟡 Сокет: ожидание установки...")
+                self.socket_status_label.setStyleSheet("font-size: 12px; color: #f39c12;")
                 return False
-
-            # Проверяем тип и состояние сокета
-            logger.info(f"🔧 Полученный сокет: {type(call_socket)}, {call_socket}")
+                
+            # Проверяем тип сокета 
+            logger.info(f"🔧 Тип сокета: {type(call_socket)}")
             
-            # Проверяем, что это действительно сокет
-            if not hasattr(call_socket, 'send') or not hasattr(call_socket, 'recv'):
-                logger.error(f"❌ Полученный объект не является сокетом: {call_socket}")
+            # Проверяем основные атрибуты сокета
+            if not hasattr(call_socket, 'send'):
+                logger.error(f"❌ Объект не является сокетом: {call_socket}")
                 self.socket_status_label.setText("🔴 Сокет: неверный тип")
                 return False
-            
-            # Проверяем подключение
-            try:
-                # Сохраняем оригинальный timeout
-                original_timeout = call_socket.gettimeout()
-                call_socket.settimeout(2.0)  # Увеличиваем timeout для надежности
+
+            # Определяем тип сокета (серверный или клиентский)
+            is_server_socket = hasattr(call_socket, 'listen')
                 
-                # Пробуем отправить тестовый байт
-                test_byte = b'P'
-                sent = call_socket.send(test_byte)
-                logger.info(f"🔧 Тестовый байт отправлен: {sent} байт")
+            if is_server_socket:
+                logger.info("🔧 Получен серверный сокет (ожидание подключения)")
+                self.call_socket = call_socket    
+                self.socket_set = True
+                self.local_mode = False
+
+                # Запускаем поток для ожидания подключения
+                threading.Thread(
+                    target=self._wait_for_incoming_connection,
+                    args=(call_socket,),
+                    daemon=True
+                ).start()
+                        
+                self.socket_status_label.setText("🟡 Сокет: ожидание подключения...")
+                self.socket_status_label.setStyleSheet("font-size: 12px; color: #f39c12;")
+                return True
+            else:
+                logger.info("🔧 Получен клиентский сокет")
                 
-                # Восстанавливаем timeout
-                call_socket.settimeout(original_timeout)
+                # Проверяем подключение
+                try:
+                    # Сохраняем оригинальный timeout
+                    original_timeout = call_socket.gettimeout()
+                    call_socket.settimeout(2.0)
+
+                    # Пробуем отправить тестовый байт
+                    call_socket.send(b'PING')
+                        
+                    # Восстанавливаем timeout
+                    call_socket.settimeout(original_timeout)
+                        
+                    logger.info("✅ Сокет проверен и готов к работе")
+                    self.local_mode = False
+                        
+                except Exception as e:
+                    logger.warning(f"⚠️ Сокет не подключен: {e}")
+                    self.local_mode = True
+                    self.socket_status_label.setText("🟡 Сокет: тестовый режим")
+                    self.socket_status_label.setStyleSheet("font-size: 12px; color: #f39c12;")
                 
-            except socket.error as e:
-                logger.error(f"❌ Сокет не подключен или ошибка отправки: {e}")
-                self.socket_status_label.setText(f"🔴 Сокет: ошибка подключения")
-                return False
-            except Exception as e:
-                logger.error(f"❌ Неожиданная ошибка проверки сокета: {e}")
-                self.socket_status_label.setText(f"🔴 Сокет: ошибка проверки")
-                return False
-            
-            # Устанавливаем сокет
-            self.call_socket = call_socket
-            self.socket_set = True
-            
-            
-            # Обновляем UI
-            self.socket_status_label.setText("🟢 Сокет: установлен и проверен")
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
-            
-            logger.info(f"✅ Сокет для звонка {self.call_id} успешно установлен")
-            return True
-            
+                # Устанавливаем сокет в любом случае
+                self.call_socket = call_socket
+                self.socket_set = True
+                    
+                # Если звонок уже активен, инициализируем аудио
+                if self.is_active and not self.audio_initialized:
+                    logger.info("🔊 Инициализация аудио после установки сокета...")
+                    QTimer.singleShot(100, self.initialize_audio_streams)
+                    
+                return True
+                         
         except Exception as e:
             logger.error(f"❌ Критическая ошибка установки сокета: {e}")
             self.socket_status_label.setText(f"🔴 Сокет: критическая ошибка")
             return False
 
+    def _wait_for_incoming_connection(self, server_socket):
+        """Ожидание входящего подключения для серверного сокета"""
+        try:
+            logger.info(f"🔄 Ожидание подключения для звонка {self.call_id}...")
+            
+            server_socket.settimeout(30.0)
+            
+            # Ждем подключения
+            client_socket, client_addr = server_socket.accept()
+            client_socket.settimeout(30.0)
+            
+            logger.info(f"✅ Подключение установлено от {client_addr}")
+            
+            # Получаем информацию о звонке
+            data = client_socket.recv(1024)
+            if data:
+                try:
+                    call_info = json.loads(data.decode())
+                    if call_info.get('type') == 'call_connect':
+                        # Отправляем подтверждение
+                        response = {'status': 'connected', 'call_id': self.call_id}
+                        client_socket.send(json.dumps(response).encode())
+                except:
+                    pass
+            
+            # Обновляем сокет
+            self.call_socket = client_socket
+            self.local_mode = False
+            
+            # Обновляем UI в главном потоке
+            self.socket_status_label.setText("🟢 Сокет: подключен")
+            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+            
+            # Закрываем серверный сокет
+            server_socket.close()
+        
+            # Если звонок активен, инициализируем аудио
+            if self.is_active and not self.audio_initialized:
+                logger.info("🔊 Инициализация аудио после подключения...")
+                QTimer.singleShot(100, self.initialize_audio_streams)
+            
+        except socket.timeout:
+            logger.error(f"❌ Таймаут ожидания подключения для звонка {self.call_id}")
+            self.socket_status_label.setText("🔴 Сокет: таймаут подключения")
+        except Exception as e:
+            logger.error(f"❌ Ошибка ожидания подключения: {e}")
+            self.socket_status_label.setText("🔴 Сокет: ошибка подключения")
+        
     def check_socket_connection(self):
         """Проверить состояние сокета соединения"""
         try:
@@ -566,20 +658,6 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.debug(f"Ошибка проверки сокета: {e}")
             return False
-
-    def check_socket_and_retry(self):
-        """Проверить сокет и повторить попытку начала звонка"""
-        if self.call_socket and not self.is_active:
-            logger.info("🔧 Сокет теперь доступен, повторная попытка start_call...")
-            self.start_call()
-        else:
-            logger.error("❌ Сокет все еще не доступен после ожидания")
-            QMessageBox.critical(self, "Ошибка", 
-                               "Соединение не установлено. Нельзя начать звонок.\n\n"
-                               "Проверьте:\n"
-                               "1. Сетевые настройки\n"
-                               "2. Брандмауэр\n"
-                               "3. Доступность портов")
 
     def populate_audio_devices(self):
         """Заполнение списков аудиоустройств"""
@@ -728,71 +806,6 @@ class CallWindow(QWidget):
             QMessageBox.warning(self, "Ошибка", f"Не удалось воспроизвести гудок: {e}")
             return False
 
-    def test_media_connection(self):
-        """Тестирование соединения с медиа-сервером"""
-        try:
-            logger.info("🔊 Тестирование соединения с медиа-сервером...")
-            
-            if not self.call_socket:
-                logger.warning("⚠️ Сокет не установлен, тестируем прямое подключение")
-                
-                # Пробуем подключиться напрямую к медиа-серверу
-                test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                test_socket.settimeout(5.0)
-                
-                try:
-                    test_socket.connect(('localhost', 9100))
-                    logger.info("✅ Успешное подключение к медиа-серверу")
-                    
-                    # Тестируем регистрацию
-                    test_data = {
-                        'call_id': f'test_{self.call_id}',
-                        'action': 'register',
-                        'username': self.username
-                    }
-                    test_socket.send(json.dumps(test_data).encode())
-                    
-                    # Ждем ответ
-                    response = test_socket.recv(1024)
-                    if response:
-                        resp = json.loads(response.decode())
-                        logger.info(f"✅ Ответ медиа-сервера: {resp}")
-                    
-                    test_socket.close()
-                    return True
-                
-                except ConnectionRefusedError:
-                    logger.error("❌ Не удалось подключиться к медиа-серверу")
-                    QMessageBox.warning(self, "Ошибка", 
-                                    "Медиа-сервер недоступен.\n"
-                                    "Запустите: python simple_media_server.py")
-                    return False
-                except Exception as e:
-                    logger.error(f"❌ Ошибка тестирования: {e}")
-                    return False
-            else:
-                # Тестируем существующее соединение
-                try:
-                    # Проверяем сокет
-                    self.call_socket.send(b'')
-                    logger.info("✅ Сокет звонка работает")
-                    
-                    # Отправляем тестовые данные
-                    test_data = b'test_packet'
-                    sent = self.call_socket.send(test_data)
-                    logger.info(f"✅ Отправлено {sent} тестовых байт")
-                    
-                    return True
-                except Exception as e:
-                    logger.error(f"❌ Сокет звонка не работает: {e}")
-                    return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка тестирования медиа-соединения: {e}")
-            return False
-
-
-
     def update_diagnostic_info(self):
         """Обновление диагностической информации"""
         current_time = time.time()
@@ -801,8 +814,19 @@ class CallWindow(QWidget):
         socket_ok = self.check_socket_connection()
         socket_status = "🟢" if socket_ok else "🔴"
         socket_text = "установлен" if socket_ok else "не установлен"
+        
+        if self.local_mode:
+            socket_status = "🟡"
+            socket_text = "локальный режим"
+        
         self.socket_status_label.setText(f"{socket_status} Сокет: {socket_text}")
-        self.socket_status_label.setStyleSheet(f"font-size: 12px; color: {'#27ae60' if socket_ok else '#e74c3c'};")
+        
+        if socket_ok and not self.local_mode:
+            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+        elif self.local_mode:
+            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+        else:
+            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
         
         if self.is_active:
             audio_status = "🔊" if self.audio_initialized else "🔇"
@@ -847,6 +871,9 @@ class CallWindow(QWidget):
             socket_ok = self.check_socket_connection()
             socket_status = "🟢" if socket_ok else "🔴"
             
+            if self.local_mode:
+                socket_status = "🟡"
+            
             debug_info = f"Вход: {'🟢' if input_active else '🔴'} | Выход: {'🟢' if output_active else '🔴'} | Сокет: {socket_status}"
             
             # Проверяем уровень сигнала в буфере
@@ -865,12 +892,6 @@ class CallWindow(QWidget):
         """Запуск полной диагностики аудио системы"""
         try:
             logger.info("🔊 ЗАПУСК ПОЛНОЙ ДИАГНОСТИКИ АУДИО...")
-            
-            # Проверяем сокет
-            socket_ok = self.check_socket_connection()
-            if not socket_ok:
-                QMessageBox.warning(self, "Диагностика", "Сокет не установлен. Сначала установите соединение.")
-                return
             
             # Тест 1: Проверка доступности sounddevice
             try:
@@ -1064,11 +1085,6 @@ class CallWindow(QWidget):
         """Безопасное принятие звонка с защитой от многократного нажатия"""
         if self.accept_button_clicked:
             logger.warning(f"Попытка повторного принятия звонка {self.call_id}")
-            return
-            
-        # Проверяем наличие сокета перед принятием
-        if not self.call_socket:
-            QMessageBox.warning(self, "Ошибка", "Соединение не установлено. Нельзя принять звонок.")
             return
             
         self.accept_button_clicked = True
@@ -1292,11 +1308,11 @@ class CallWindow(QWidget):
                         output_found = True
                     logger.info(f"🔊 Fallback: комбинированное устройство {i}: {device['name']}")
                     break
-    
+
     def start_call(self):
         """Начать звонок (после принятия)"""
         try:
-            logger.info(f"🔊 Безопасный запуск звонка {self.call_id}")
+            logger.info(f"🔊 Запуск звонка {self.call_id}")
             
             # Проверяем наличие сокета
             if not self.call_socket:
@@ -1316,34 +1332,39 @@ class CallWindow(QWidget):
                     except Exception as e:
                         logger.error(f"❌ Ошибка получения сокета от родителя: {e}")
             
-            # Если сокета все еще нет, показываем предупреждение
+            # Если сокета все еще нет, устанавливаем локальный режим
             if not self.call_socket:
                 logger.warning("⚠️ Звонок запускается без сокета - будет работать в локальном режиме")
-                self.status_label.setText("🔇 Локальный режим (без сетевого аудио)")
-                self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+                self.local_mode = True
+                self.socket_status_label.setText("🔇 Локальный режим (без сетевого аудио)")
+                self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
             
-            # Запускаем звонок
-            self.start_call()
+            # Инициализируем аудио потоки
+            success = self.initialize_audio_streams()
+            if success:
+                # Запускаем таймер длительности
+                self.call_start_time = time.time()
+                self.duration_timer.start(1000)
+                self.duration_label.setVisible(True)
+                self.is_active = True
+                self.status_label.setText("Звонок активен")
+                
+                # Обновляем статус
+                if self.local_mode:
+                    self.status_label.setText("🔇 Локальный режим (тестовый)")
+                    self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+                else:
+                    self.status_label.setText("✅ Звонок активен")
+                    self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+                
+                logger.info(f"✅ Звонок {self.call_id} успешно запущен")
+            else:
+                logger.error(f"❌ Не удалось инициализировать аудио для звонка {self.call_id}")
+                QMessageBox.warning(self, "Ошибка", "Не удалось инициализировать аудио. Проверьте настройки аудиоустройств.")
             
         except Exception as e:
-            logger.error(f"❌ Ошибка безопасного запуска звонка: {e}")
-
-    def safe_start_call(self):
-        """Безопасный запуск звонка с проверкой сокета"""
-        try:
-            logger.info(f"🔊 Безопасный запуск звонка {self.call_id}")
-            
-            # Проверяем наличие сокета
-            if not self.call_socket:
-                logger.warning("⚠️ Сокет не установлен, работаем в локальном режиме")
-                self.status_label.setText("🔇 Локальный режим (без сетевого аудио)")
-                self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-            
-            # Запускаем звонок
-            self.start_call()
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка безопасного запуска звонка: {e}")
+            logger.error(f"❌ Ошибка запуска звонка: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Ошибка запуска звонка: {e}")
 
     def initialize_audio_streams(self):
         """Инициализация аудио потоков на выбранных устройствах"""
@@ -1352,14 +1373,10 @@ class CallWindow(QWidget):
                 logger.info("⚠️ Аудио уже инициализировано")
                 return True
 
-            # ✅ ВАЖНАЯ ПРОВЕРКА: убедимся, что сокет установлен
-            if not self.call_socket:
-                logger.error("❌ ⚠️ Сокет не установлен, инициализируем локальное аудио")
-                # Создаем локальные аудио потоки без сетевой передачи
+            # Определяем режим работы
+            if not self.call_socket or self.local_mode:
+                logger.info("🔊 Работа в локальном режиме (без сетевого аудио)")
                 return self.initialize_local_audio()
-            else:    
-                self.show_audio_error("Соединение не установлено")
-                return False
 
             import sounddevice as sd
             import numpy as np
@@ -1406,14 +1423,15 @@ class CallWindow(QWidget):
                         try:
                             # ✅ ПРОВЕРЯЕМ ВСЕ УСЛОВИЯ ПЕРЕД ОТПРАВКОЙ
                             if (self.call_socket and 
-                                self.is_active and self.audio_initialized):
+                                self.is_active and self.audio_initialized and
+                                not self.local_mode):
                                 # Преобразуем в байты и отправляем
                                 audio_data = indata.astype(np.float32).tobytes()
                                 success = self.send_audio_data(audio_data)
                                 if success:
                                     self.sent_packets += 1
                                     if self.sent_packets % 50 == 0:
-                                        logger.info(f"🎤 Отправлено пакетов: {self.sent_packets}")
+                                        logger.debug(f"🎤 Отправлено пакетов: {self.sent_packets}")
                         except Exception as e:
                             logger.debug(f"Ошибка в input callback: {e}")
 
@@ -1429,7 +1447,7 @@ class CallWindow(QWidget):
                                 outdata[:] = audio_data.reshape(-1, 1)
                                 self.received_packets += 1
                                 if self.received_packets % 50 == 0:
-                                    logger.info(f"🔊 Воспроизведено пакетов: {self.received_packets}")
+                                    logger.debug(f"🔊 Воспроизведено пакетов: {self.received_packets}")
                             else:
                                 outdata.fill(0)    
                         except Exception as e:
@@ -1484,6 +1502,115 @@ class CallWindow(QWidget):
             self.show_audio_error(f"Аудио недоступно: {e}")
             return False
 
+    def initialize_local_audio(self):
+        """Инициализация локального аудио (без сетевого соединения)"""
+        try:
+            logger.info("🔊 Инициализация локального аудио (тестовый режим)")
+            
+            import sounddevice as sd
+            import numpy as np
+            
+            # Определяем устройства для использования
+            input_device = self.input_device
+            output_device = self.output_device
+            
+            # Если устройства не выбраны, используем автовыбор
+            if input_device is None:
+                try:
+                    default_input = sd.default.device[0] if sd.default.device else 0
+                    input_device = default_input
+                except:
+                    input_device = 0
+                    
+            if output_device is None:
+                try:
+                    default_output = sd.default.device[1] if sd.default.device else 0
+                    output_device = default_output
+                except:
+                    output_device = 0
+            
+            logger.info(f"🔧 Используемые устройства для локального аудио: ввод={input_device}, вывод={output_device}")
+            
+            # Создаем буфер для локального тестирования
+            self.local_audio_buffer = []
+            self.local_buffer_lock = threading.Lock()
+            
+            # Callback для захвата аудио
+            def input_callback(indata, frames, time, status):
+                if status:
+                    logger.debug(f"Локальный входной статус: {status}")
+            
+                try:
+                    # Сохраняем данные в буфер для локального воспроизведения
+                    with self.local_buffer_lock:
+                        if len(self.local_audio_buffer) < 5:  # Ограничиваем размер буфера
+                            self.local_audio_buffer.append(indata.copy())
+                except Exception as e:
+                    logger.debug(f"Ошибка в локальном input callback: {e}")
+            
+            # Callback для воспроизведения аудио
+            def output_callback(outdata, frames, time, status):
+                if status:
+                    logger.debug(f"Локальный выходной статус: {status}")
+                
+                try:
+                    # Получаем данные из локального буфера
+                    with self.local_buffer_lock:
+                        if self.local_audio_buffer:
+                            data = self.local_audio_buffer.pop(0)
+                            if len(data) >= frames:
+                                outdata[:] = data[:frames]
+                            else:
+                                # Если данных недостаточно, заполняем нулями
+                                outdata[:len(data)] = data
+                                outdata[len(data):] = 0
+                        else:
+                            outdata.fill(0)
+                except Exception as e:
+                    logger.debug(f"Ошибка в локальном output callback: {e}")
+                    outdata.fill(0)
+            
+            # Создаем отдельные потоки
+            self.input_stream = sd.InputStream(
+                device=input_device,
+                samplerate=44100,
+                blocksize=1024,
+                channels=self.channels,
+                callback=input_callback,
+                dtype=np.float32
+            )
+            
+            self.output_stream = sd.OutputStream(
+                device=output_device,
+                samplerate=44100,
+                blocksize=1024,
+                channels=self.channels,
+                callback=output_callback,
+                dtype=np.float32
+            )
+            
+            # Запускаем потоки
+            self.input_stream.start()
+            self.output_stream.start()
+            
+            self.audio_initialized = True
+            self.local_mode = True
+            
+            logger.info("✅ Локальное аудио инициализировано (тестовый режим)")
+            
+            # Показываем статус
+            self.audio_status_label.setText("🔊 Локальный режим (аудио тест)")
+            self.audio_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+            self.status_label.setText("🔇 Локальный режим (тестовый)")
+            self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка инициализации локального аудио: {e}")
+            self.show_audio_error(f"Локальное аудио недоступно: {e}")
+            return False
+
     def get_audio_data(self, frames):
         """Получение аудио данных из буфера"""
         if not self.is_active:
@@ -1505,7 +1632,7 @@ class CallWindow(QWidget):
     def send_audio_data(self, audio_data):
         """Отправка аудио данных с проверкой соединения"""
         try:
-            if not self.call_socket or not self.is_active or not self.audio_initialized:
+            if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
                 return False
 
             # Проверяем что сокет еще подключен
@@ -1532,7 +1659,7 @@ class CallWindow(QWidget):
     def receive_audio_data(self):
         """Прием аудио данных из сокета"""
         try:
-            if self.call_socket and self.is_active and self.audio_initialized:
+            if self.call_socket and self.is_active and self.audio_initialized and not self.local_mode:
                 
                 # Устанавливаем таймаут для неблокирующего чтения
                 self.call_socket.settimeout(0.1)
@@ -1565,25 +1692,30 @@ class CallWindow(QWidget):
                             self.audio_buffer.append(audio_array)
  
             else:
-                logger.warning("🔊 Не могу принять аудио: нет сокета или поток не инициализирован")
+                logger.debug("🔊 Не могу принять аудио: нет сокета или поток не инициализирован или локальный режим")
                        
         except socket.timeout:
             pass
         except Exception as e:
-            if self.is_active:
+            if self.is_active and not self.local_mode:
                 logger.debug(f"Ошибка приема аудио данных: {e}")
 
     def start_audio_receiver(self):
         """Запуск потока для приема аудио данных"""
+        if self.audio_receiver_running or self.local_mode:
+            return
+            
         def audio_receiver():
             logger.info("Запуск приемника аудио данных")
-            while self.is_active and self.call_socket:
+            self.audio_receiver_running = True
+            while self.is_active and self.call_socket and not self.local_mode:
                 try:
                     self.receive_audio_data()
                 except Exception as e:
-                    if self.is_active:
+                    if self.is_active and not self.local_mode:
                         logger.debug(f"Ошибка в аудио приемнике: {e}")
                     break
+            self.audio_receiver_running = False
             logger.info("Приемник аудио данных остановлен")
 
         self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=True)
@@ -1595,7 +1727,16 @@ class CallWindow(QWidget):
             logger.info(f"🔴 Остановка аудио потоков для звонка {self.call_id}")
             self.audio_initialized = False 
             self.is_active = False
+            self.audio_receiver_running = False
 
+            if hasattr(self, 'audio_stream') and self.audio_stream is not None:
+                try:
+                    self.audio_stream.stop()
+                    self.audio_stream.close()
+                except Exception as e:
+                    logger.debug(f"Ошибка остановки audio stream: {e}")
+                self.audio_stream = None
+                
             if hasattr(self, 'input_stream') and self.input_stream is not None:
                 try:
                     self.input_stream.stop()
@@ -1614,6 +1755,11 @@ class CallWindow(QWidget):
 
             with self.audio_buffer_lock:
                 self.audio_buffer.clear()
+            
+            # Очищаем локальный буфер если он есть
+            if hasattr(self, 'local_audio_buffer'):
+                with self.local_buffer_lock:
+                    self.local_audio_buffer.clear()
             
             logger.info(f"✅ Аудио потоки для звонка {self.call_id} остановлены")
                 
@@ -1638,14 +1784,6 @@ class CallWindow(QWidget):
                 logger.warning(f"Звонок {self.call_id} уже принят")
                 return
                 
-            # Проверяем сокет перед принятием
-            if not self.call_socket:
-                logger.error(f"❌ Не могу принять звонок {self.call_id}: сокет не установлен")
-                QMessageBox.critical(self, "Ошибка", 
-                                   "Соединение не установлено. Нельзя принять звонок.\n\n"
-                                   "Убедитесь, что сокет был установлен через set_call_socket() перед принятием звонка.")
-                return
-
             self.is_active = True
             self.status_label.setText("Звонок принят")
             
@@ -1676,14 +1814,11 @@ class CallWindow(QWidget):
             # Запускаем звонок
             self.start_call()
             
-            # Отправляем сигнал о принятии звонка
-            self.call_accepted.emit(self.call_id)
-            
             logger.info(f"Звонок {self.call_id} принят")
             
         except Exception as e:
             logger.error(f"Ошибка принятия звонка: {e}")
-    
+
     def reject_call(self):
         """Отклонить входящий звонок"""
         try:

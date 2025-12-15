@@ -135,9 +135,7 @@ class P2PMainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self.on_tab_changed)
         main_layout.addWidget(self.tabs)
         
-        # Подключите сигнал изменения вкладки ОДИН РАЗ
-        self.tabs.currentChanged.connect(self.on_tab_changed)
-
+        
         # Создаем системную вкладку
         self.create_system_tab()
         
@@ -155,59 +153,28 @@ class P2PMainWindow(QMainWindow):
         
         logger.info("P2P интерфейс инициализирован")
         
-        
-    def setup_call_media(self, call_id, username, is_outgoing=True):
-        """Настройка медиа-соединения для звонка"""
-        try:
-            logger.info(f"🔊 Настройка медиа для звонка {call_id} (исходящий: {is_outgoing})")
-            
-            if not self.p2p_client:
-                logger.error("❌ P2P клиент не инициализирован")
-                return False
-        
-            # Устанавливаем медиа-соединение через P2P клиент
-            if hasattr(self.p2p_client, 'setup_media_connection'):
-                if is_outgoing:
-                    # Для исходящего звонка регистрируемся на сервере
-                    success = self.p2p_client.setup_simple_media_connection(call_id, username)
-                    if success:
-                        logger.info(f"✅ Исходящее медиа-соединение установлено для {call_id}")
-                        return True
-                else:
-                    logger.error("❌ Не удалось установить исходящее медиа-соединение")
-                    return False
-            else:
-                logger.warning("⚠️ P2P клиент не поддерживает упрощенные медиа-соединения")
-                return False
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка настройки медиа: {e}")
-            return False
-
-    def finalize_call_accept(self, call_id, call_window):
+    def _finalize_call_accept(self, call_id, call_window):
         """Завершающая стадия принятия звонка"""
         try:
-            # Получаем сокет и устанавливаем в окне звонка
-            if self.p2p_client:
-                call_socket = self.p2p_client.get_media_socket(call_id)
-                if call_socket:
-                    success = call_window.set_call_socket(call_socket)
-                    if success:
-                        logger.info("✅ Сокет установлен в окне звонка")
-                        self.system_chat.append("✅ Аудио соединение установлено")
-                    else:
-                        logger.error("❌ Не удалось установить сокет в окне звонка")
-                else:
-                    logger.error("❌ Сокет для звонка не получен")
+            # Проверяем, установлен ли сокет
+            if not call_window.socket_set:
+                logger.warning(f"⚠️ Сокет для звонка {call_id} еще не установлен")
+                
+                # Пробуем получить сокет из P2P клиента
+                if self.p2p_client:
+                    call_socket = self.p2p_client.get_call_socket(call_id)
+                    if call_socket:
+                        call_window.set_call_socket(call_socket)
             
             # Запускаем звонок в UI
-            call_window.start_call()
-            logger.info("✅ Звонок принят в UI")
+            call_window.accept_call()
+            
+            self.system_chat.append(f"✅ Звонок с {call_window.username} принят")
+            logger.info(f"✅ Звонок {call_id} принят")
             
         except Exception as e:
-            logger.error(f"❌ Ошибка финализации принятия звонка: {e}")
-
-    # Рабочие методы
+            logger.error(f"❌ Ошибка финализации принятия звонка: {e}")    
+        
     def setup_system_tray(self):
         """Настройка системного трея"""
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -913,6 +880,25 @@ class P2PMainWindow(QMainWindow):
             if hasattr(self, 'system_chat'):
                 self.system_chat.append(f"⚠️ Ошибка обновления списка пользователей: {e}")
 
+    def handle_call_request(self, data: dict):
+        """Обработка входящего запроса на звонок"""
+        try:
+            call_id = data.get('call_id')
+            from_user = data.get('from')
+            call_type = data.get('call_type')
+            
+            if call_id and from_user:
+                logger.info(f"🔊 Входящий звонок {call_id} от {from_user}")
+                
+                # Создаем окно звонка
+                self.show_incoming_call(call_id, from_user, call_type)
+                
+            else:
+                logger.warning("⚠️ Неполный запрос на звонок")
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки запроса на звонок: {e}")
+    
     def get_network_info(self):
         """Получение информации о сети - работаем напрямую с P2PNetworkClient"""
         try:
@@ -1055,18 +1041,15 @@ class P2PMainWindow(QMainWindow):
             QMessageBox.warning(self, 'Ошибка', 'P2P клиент не инициализирован')
             return
             
-        logger.info(f"P2PMainWindow.start_call: Начало {call_type} звонка с {username}")
-        
         # Отправляем запрос на звонок
         call_id = self.p2p_client.send_call_request(username, call_type)
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на звонок')
             return
-    
+
         # Создаем окно звонка
         call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self)
         call_window.call_ended.connect(self.end_call)
-        call_window.show()
         
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
@@ -1078,27 +1061,35 @@ class P2PMainWindow(QMainWindow):
         }
 
         # Настраиваем медиа-соединение
-        media_success = self.setup_simple_call_media(call_id, username, is_outgoing=True)
+        logger.info("🔧 Настройка исходящего соединения для исходящего звонка...")
         
-        if media_success:
-            logger.info(f"✅ Медиа-соединение настроено для исходящего звонка {call_id}")
+        # ВАЖНО: Получаем сокет для звонка
+        call_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
+        
+        if call_socket:
+            logger.info(f"✅ Исходящий сокет для звонка {call_id} создан")
             
-            # Получаем сокет и устанавливаем в окне
-            if hasattr(self.p2p_client, 'get_simple_media_socket'):
-                call_socket = self.p2p_client.get_simple_media_socket(call_id)
-                if call_socket:
-                    call_window.set_call_socket(call_socket)
+            # Устанавливаем сокет в окне
+            success = call_window.set_call_socket(call_socket)
+            if success:
+                logger.info(f"✅ Сокет установлен для звонка {call_id}")
+            else:
+                logger.error(f"❌ Не удалось установить сокет для звонка {call_id}")
+                self.system_chat.append(f"⚠️ Звонок начат, но аудио может не работать")
         else:
-            logger.warning(f"⚠️ Не удалось настроить медиа-соединение для звонка {call_id}")
-            
+            logger.warning(f"⚠️ Не удалось получить сокет для звонка {call_id}")
+            self.system_chat.append(f"⚠️ Звонок начат, но аудио соединение не установлено")
+
         # Показываем окно
         call_window.show()
-            
+        call_window.raise_()
+        call_window.activateWindow()
+        
         logger.info(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
         self.system_chat.append(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
 
     def accept_call(self, call_id):
-        """Принять входящий звонок в P2P сети"""
+        """Принять входящий звонок"""
         try:
             logger.info(f"=== ПОПЫТКА ПРИНЯТЬ ЗВОНОК {call_id} ===")
 
@@ -1114,21 +1105,12 @@ class P2PMainWindow(QMainWindow):
             if self.p2p_client and self.p2p_client.send_call_response(call_id, 'accept'):
                 logger.info("✅ Подтверждение отправлено через P2P сеть")
                 
-                # 2. Настраиваем медиа-соединение
-                logger.info("🔊 Настройка медиа-соединения для входящего звонка...")
-                if self.p2p_client and self.p2p_client.setup_media_connection(call_id, username):
-                    logger.info("✅ P2P медиа соединение установлено")
-                
-                    # 3. Ждем немного, чтобы соединение установилось
-                    QTimer.singleShot(1000, lambda: self.finalize_call_accept(call_id, call_window))
-                else:
-                    logger.warning("⚠️ Не удалось установить медиа соединение")
-                    self.system_chat.append(f"⚠️ Звонок с {username} продолжается без аудио")
-                    call_window.start_call()
+                # Ждем немного, чтобы соединение установилось
+                QTimer.singleShot(1000, lambda: self._finalize_call_accept(call_id, call_window))
             else:
                 logger.error("❌ Не удалось отправить подтверждение через P2P сеть")
                 self.system_chat.append("❌ Не удалось отправить подтверждение звонка")
-   
+    
         except Exception as e:
             logger.error(f"❌ Критическая ошибка в accept_call: {e}")
             import traceback
@@ -1140,7 +1122,7 @@ class P2PMainWindow(QMainWindow):
             logger.info(f"=== ОТКЛОНЕНИЕ ЗВОНКА {call_id} ===") 
 
 
-            if call_id in self.active_calls:
+            if call_id not in self.active_calls:
                 logger.error(f"❌ Звонок {call_id} не найден в active_calls")
                 return
                 
@@ -1379,69 +1361,7 @@ class P2PMainWindow(QMainWindow):
         network_info = self.get_network_info()
         self.system_chat.append(f"📊 Сеть: {network_info.get('status')}, пиров: {network_info.get('connected_peers')}/{network_info.get('known_peers')}")
     
-    def handle_call_message(self, message_data):
-        """Обработка сообщений о звонках из P2P сети"""
-        try:
-            msg_type = message_data.get('type')
-            
-            if msg_type == 'call_request':
-                # Входящий запрос на звонок
-                call_id = message_data.get('call_id')
-                call_type = message_data.get('call_type')
-                from_user = message_data.get('from_user')
-                
-                logger.info(f"🔊 Входящий запрос на звонок: {call_id} от {from_user}")
-                
-                # Сохраняем в call_requests
-                self.call_requests[call_id] = {
-                    'from_user': from_user,
-                    'call_type': call_type,
-                    'status': 'pending'
-                }
-                
-                # Показываем окно входящего звонка
-                QTimer.singleShot(100, lambda: self.show_incoming_call(call_id, from_user, call_type))
-                
-            elif msg_type == 'call_response':
-                # Ответ на наш запрос звонка
-                call_id = message_data.get('call_id')
-                response = message_data.get('response')
-                from_user = message_data.get('from_user')
-                
-                logger.info(f"🔊 Ответ на звонок {call_id}: {response}")
-                
-                if call_id in self.active_calls:
-                    call_info = self.active_calls[call_id]
-                    call_window = call_info['window']
-                    
-                    if response == 'accept':
-                        # Звонок принят
-                        logger.info(f"🔊 Звонок {call_id} принят пользователем {from_user}")
-                        
-                        # Настраиваем медиа соединение для исходящего звонка
-                        QTimer.singleShot(100, lambda: self.setup_media_for_call(call_id, from_user))
-                        
-                        # Отправляем системное сообщение
-                        self.system_chat.append(f"✅ Пользователь {from_user} принял ваш звонок")
-                        
-                    elif response == 'reject':
-                        # Звонок отклонен
-                        logger.info(f"🔊 Звонок {call_id} отклонен")
-                        call_window.close()
-                        del self.active_calls[call_id]
-                        self.system_chat.append(f"❌ Пользователь {from_user} отклонил ваш звонок")
-                        
-                    elif response == 'end':
-                        # Звонок завершен
-                        logger.info(f"🔊 Звонок {call_id} завершен другим пользователем")
-                        if call_id in self.active_calls:
-                            call_window = self.active_calls[call_id]['window']
-                            call_window.close()
-                            del self.active_calls[call_id]
-                            
-        except Exception as e:
-            logger.error(f"❌ Ошибка обработки сообщения о звонке: {e}")
-
+    
     def setup_call_media(self, call_id, username, is_outgoing):
         """Упрощенная настройка медиа для звонка"""
         try:
@@ -1534,56 +1454,72 @@ class P2PMainWindow(QMainWindow):
                 QSystemTrayIcon.Information,
                 3000
             )
-        
-    def on_tab_changed(self, index):
-        """Обработка смены вкладки"""
-        if index > 0:  # Не системная вкладка
-            widget = self.tabs.widget(index)
-            if hasattr(widget, 'set_active'):
-                widget.set_active(True)
-                for username, chat in self.active_chats.items():
-                    if chat != widget and hasattr(chat, 'set_active'):
-                        chat.set_active(False)
 
     def handle_incoming_call_request(self, from_user, call_type, call_id):
         """Обработка входящего запроса на звонка"""
-        if call_id in self.active_calls:
-            logger.warning(f"Дублирующий запрос на звонок {call_id}, игнорируем")
-            return
-
-        logger.info(f"Обработка входящего звонка от {from_user}, тип: {call_type}")
-
-        self.system_chat.append(f"🔊 ВХОДЯЩИЙ ЗВОНОК от {from_user}, тип: {call_type}")
-
-        self.show_notification(
-            f"📞 Входящий {call_type} звонок",
-            f"Пользователь {from_user} звонит вам"
-        )
-        
         try:
+            logger.info(f"=== ОБРАБОТКА ВХОДЯЩЕГО ЗВОНКА {call_id} ОТ {from_user} ===")
+            
+            if call_id in self.active_calls:
+                logger.warning(f"Дублирующий запрос на звонок {call_id}, игнорируем")
+                return
+
+            # Создаем окно звонка
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
             call_window.call_ended.connect(self.end_call)
             call_window.call_accepted.connect(self.accept_call)
             call_window.call_rejected.connect(self.reject_call)
             
+            # Сохраняем информацию о звонке
             self.active_calls[call_id] = {
                 'window': call_window,
                 'username': from_user,
                 'type': call_type,
-                'outgoing': False
+                'outgoing': False,
+                'status': 'incoming'
             }
 
+            # Получаем или создаем сокет для звонка
+            if self.p2p_client:
+                logger.info(f"🔧 Настройка соединения для входящего звонка {call_id}")
+                
+                # Создаем серверный сокет для входящего звонка
+                call_socket = self.p2p_client.setup_call_connection(
+                    call_id, from_user, is_outgoing=False
+                )
+            
+                if call_socket:
+                    logger.info(f"✅ Сокет для входящего звонка {call_id} создан")
+                    
+                    # Устанавливаем сокет в окне
+                    success = call_window.set_call_socket(call_socket)
+                    if success:
+                        logger.info(f"✅ Сокет установлен в окне звонка {call_id}")
+                    else:
+                        logger.error(f"❌ Не удалось установить сокет в окне звонка {call_id}")
+                else:
+                    logger.error(f"❌ Не удалось создать сокет для входящего звонка {call_id}")
+            
+            # Показываем окно
             call_window.show()
             call_window.raise_()
             call_window.activateWindow()
+            
+            # Показываем уведомление
+            self.show_notification(
+                f"📞 Входящий {call_type} звонок",
+                f"Пользователь {from_user} звонит вам"
+            )
         
-            logger.info(f"🔊 Окно звонка показано и активировано")
+            logger.info(f"✅ Окно звонка {call_id} показано")
             self.system_chat.append(f"📞 Входящий {call_type} звонок от {from_user}")
 
         except Exception as e:
             logger.error(f"❌ Ошибка создания окна звонка: {e}")
+            import traceback
+            logger.error(f"Трассировка: {traceback.format_exc()}")
             self.system_chat.append(f"❌ Ошибка создания окна звонка: {e}")
-        
+
     def handle_call_accepted(self, from_user, call_id):
         """Обработка принятия звонка другим пользователем"""
         logger.info(f"🔊 Звонок принят пользователем {from_user}")

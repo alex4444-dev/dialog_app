@@ -66,7 +66,7 @@ def main():
         # 3. Запуск теста медиа-сервера
         print("🔊 Тестирование медиа-сервера...")
         test_proc = subprocess.run(
-            "python test_call.py",
+            "python tests/test_call.py",
             shell=True,
             capture_output=True,
             text=True

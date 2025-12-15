@@ -230,6 +230,36 @@ class P2PChatClient:
             logger.error(f"❌ Ошибка создания локального медиа сокета: {e}")
             return False
 
+    def get_media_socket(self, call_id):
+        """Получить медиа сокет для звонка"""
+        try:
+            # Сначала пробуем получить реальный сокет
+            if call_id in self.media_sockets:
+                socket_obj = self.media_sockets[call_id]
+                if socket_obj:
+                    # Проверяем, что сокет еще живой
+                    try:
+                        socket_obj.send(b'P')
+                        return socket_obj
+                    except:
+                        # Сокет мертв, удаляем его
+                        del self.media_sockets[call_id]
+            
+            # Если нет сокета, пробуем создать локальный для тестирования
+            if call_id in self.call_requests:
+                call_info = self.call_requests[call_id]
+                if self.create_local_media_socket(call_id):
+                    # Ждем немного, чтобы соединение установилось
+                    import time
+                    time.sleep(0.5)
+                    return self.media_sockets.get(call_id)
+            
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения медиа сокета: {e}")
+            return None
+    
     def close_media_connection(self, call_id):
         """Закрыть медиа соединение"""
         try:

@@ -46,6 +46,62 @@ class CallManager:
         with self.call_lock:
             return self.active_calls.get(call_id)
             
+    def get_call_socket(self, call_id: str):
+        """Получение сокета для звонка"""
+        try:
+            # Пытаемся получить медиа-сокет
+            if call_id in self.media_sockets:
+                media_socket = self.media_sockets[call_id]
+                # Проверяем, что сокет работает
+                try:
+                    media_socket.send(b'')  # Тестовая отправка
+                    logger.info(f"✅ Медиа-сокет для звонка {call_id} проверен")
+                    return media_socket
+                except:
+                    logger.warning(f"⚠️ Медиа-сокет для звонка {call_id} не работает")
+            
+            # Если медиа-сокета нет, создаем новое прямое подключение
+            logger.info(f"🔧 Создание прямого сокета для звонка {call_id}")
+            
+            # Создаем сокет для звонка
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            call_socket.settimeout(5.0)
+            
+            # Находим свободный порт для звонка
+            call_port = self._find_free_call_port()
+            if not call_port:
+                logger.error(f"❌ Не удалось найти свободный порт для звонка {call_id}")
+                return None
+        
+            # Привязываем сокет
+            call_socket.bind(('0.0.0.0', call_port))
+            call_socket.listen(1)
+            call_socket.settimeout(10.0)
+        
+            # Сохраняем информацию о сокете
+            self.media_sockets[call_id] = call_socket
+            
+            logger.info(f"✅ Создан сокет для звонка {call_id} на порту {call_port}")
+            return call_socket
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сокета для звонка: {e}")
+            return None
+
+    def _find_free_call_port(self):
+        """Найти свободный порт для звонка"""
+        for port in range(9200, 9500):
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    s.bind(('0.0.0.0', port))
+                    return port
+            except:
+                continue
+        return None
+
+
     def is_call_active(self, call_id):
         """Проверка активности звонка"""
         with self.call_lock:

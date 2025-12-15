@@ -106,10 +106,7 @@ class P2PNetworkClient(QObject):
         self.media_connections = {}  # call_id -> media_info
         self.call_requests = {}  # call_id -> call_info
         
-        # Запускаем поток для повторной отправки
-        self.retry_thread = threading.Thread(target=self._retry_messages_loop, daemon=True)
-        self.retry_thread.start()
-
+        
     
     
     def connect_to_peer_media(self, call_id, peer_username):
@@ -881,6 +878,213 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"Ошибка обработки отключения пира {peer_id}: {e}")
                 
+    def setup_call_connection(self, call_id: str, peer_username: str, is_outgoing: bool) -> socket.socket:
+        """Настройка соединения для звонка - создает и возвращает готовый сокет"""
+        try:
+            logger.info(f"🔊 Настройка соединения для звонка {call_id} (исходящий: {is_outgoing})")
+            
+            # Ищем информацию о пире
+            peer_info = None
+            for pid, p_info in list(self.connected_peers.items()):
+                if p_info.get('username') == peer_username:
+                    peer_info = p_info
+                    break
+        
+            if not peer_info:
+                logger.error(f"❌ Пир {peer_username} не найден в подключенных")
+                return None
+            
+            peer_host, peer_port = peer_info['address']
+            
+            if is_outgoing:
+                # Для исходящего звонка создаем сокет и подключаемся
+                logger.info(f"🔧 Создание исходящего соединения к {peer_host}:{peer_port}")
+                return self._create_outgoing_call_socket(call_id, peer_host, peer_port)
+            else:
+                # Для входящего звонка создаем серверный сокет и ждем подключения
+                logger.info(f"🔧 Создание входящего соединения, ожидание подключения...")
+                return self._create_incoming_call_socket(call_id, peer_host, peer_port)
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки соединения для звонка: {e}")
+            return None
+
+    def _create_outgoing_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
+        """Создание исходящего сокета для звонка"""
+        try:
+            # Создаем сокет для звонка (используем порт 0 для автоматического выбора)
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Находим свободный порт
+            call_socket.bind(('0.0.0.0', 0))
+            local_port = call_socket.getsockname()[1]
+            logger.info(f"🔧 Исходящий сокет привязан к порту {local_port}")
+            
+            # Подключаемся к пиру
+            call_socket.settimeout(10.0)
+            logger.info(f"🔧 Подключение к {peer_host}:{peer_port}...")
+            
+            try:
+                call_socket.connect((peer_host, peer_port))
+            except Exception as e:
+                logger.error(f"❌ Не удалось подключиться к {peer_host}:{peer_port}: {e}")
+                
+                # Пробуем обратный порт (peer_port + 1)
+                try:
+                    logger.info(f"🔄 Попытка подключения к порту {peer_port + 1}...")
+                    call_socket.close()
+                    
+                    call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                    call_socket.bind(('0.0.0.0', 0))
+                    call_socket.settimeout(10.0)
+                    call_socket.connect((peer_host, peer_port + 1))
+                except Exception as e2:
+                    logger.error(f"❌ Вторая попытка подключения также не удалась: {e2}")
+                    call_socket.close()
+                    return None
+            
+            # Устанавливаем нормальный таймаут
+            call_socket.settimeout(30.0)
+            
+            # Отправляем информацию о звонке
+            call_info = {
+                'type': 'call_connect',
+                'call_id': call_id,
+                'action': 'connect',
+                'from': self.username
+            }
+            
+            call_socket.send(json.dumps(call_info).encode())
+            
+            # Ждем подтверждения
+            response = call_socket.recv(1024)
+            if response:
+                resp = json.loads(response.decode())
+                if resp.get('status') == 'connected':
+                    logger.info(f"✅ Подключение для звонка {call_id} установлено")
+                    
+                    # Сохраняем сокет
+                    self.media_sockets[call_id] = call_socket
+                    return call_socket
+            
+            logger.error(f"❌ Не получено подтверждение подключения для звонка {call_id}")
+            call_socket.close()
+            return None
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания исходящего сокета: {e}")
+            return None
+
+    def _create_incoming_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
+        """Создание входящего сокета для звонка (серверный сокет)"""
+        try:
+            # Создаем серверный сокет
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Привязываем к порту peer_port + 1 (для входящих подключений)
+            listen_port = peer_port + 1
+            max_attempts = 10
+            
+            for attempt in range(max_attempts):
+                try:
+                    server_socket.bind(('0.0.0.0', listen_port))
+                    break
+                except OSError:
+                    listen_port += 1
+                    continue
+            else:
+                logger.error(f"❌ Не удалось найти свободный порт после {max_attempts} попыток")
+                return None
+            
+            server_socket.listen(1)
+            server_socket.settimeout(30.0)
+            
+            logger.info(f"🔧 Серверный сокет создан на порту {listen_port}")
+            
+            # Сохраняем серверный сокет
+            self.media_sockets[call_id] = server_socket
+            
+            # Запускаем поток для ожидания подключения
+            accept_thread = threading.Thread(
+                target=self._wait_for_call_connection,
+                args=(call_id, server_socket),
+                daemon=True
+            )
+            accept_thread.start()
+            
+            return server_socket
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания входящего сокета: {e}")
+            return None
+
+    def _wait_for_call_connection(self, call_id: str, server_socket: socket.socket):
+        """Ожидание входящего подключения для звонка"""
+        try:
+            logger.info(f"🔄 Ожидание подключения для звонка {call_id}...")
+            
+            client_socket, client_addr = server_socket.accept()
+            client_socket.settimeout(30.0)
+            
+            logger.info(f"✅ Подключение для звонка {call_id} установлено от {client_addr}")
+            
+            # Получаем информацию о звонке
+            data = client_socket.recv(1024)
+            if data:
+                call_info = json.loads(data.decode())
+                if call_info.get('type') == 'call_connect':
+                    # Отправляем подтверждение
+                    response = {'status': 'connected', 'call_id': call_id}
+                    client_socket.send(json.dumps(response).encode())
+                    
+                    # Обновляем сокет на клиентский
+                    self.media_sockets[call_id] = client_socket
+                    
+                    # Закрываем серверный сокет
+                    server_socket.close()
+                    
+                    logger.info(f"✅ Соединение для звонка {call_id} полностью установлено")
+                    return
+            
+            logger.error(f"❌ Неверные данные подключения для звонка {call_id}")
+            client_socket.close()
+        
+        except socket.timeout:
+            logger.error(f"❌ Таймаут ожидания подключения для звонка {call_id}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка ожидания подключения: {e}")
+        finally:
+            if call_id in self.media_sockets:
+                del self.media_sockets[call_id]
+
+    def get_call_socket(self, call_id: str) -> socket.socket:
+        """Получение сокета для звонка"""
+        try:
+            if call_id in self.media_sockets:
+                socket_obj = self.media_sockets[call_id]
+                
+                # Проверяем, что сокет еще живой
+                try:
+                    # Для серверных сокетов
+                    if hasattr(socket_obj, 'listen'):
+                        return socket_obj
+                    
+                    # Для клиентских сокетов
+                    socket_obj.send(b'')
+                    return socket_obj
+                except:
+                    logger.warning(f"⚠️ Сокет для звонка {call_id} не работает")
+                    del self.media_sockets[call_id]
+                    return None
+        
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сокета: {e}")
+            return None
 
     def _mark_messages_undelivered(self, username: str):
         """Помечаем сообщения для пользователя как недоставленные"""
@@ -898,8 +1102,7 @@ class P2PNetworkClient(QObject):
                     
         except Exception as e:
             logger.error(f"Ошибка пометки недоставленных сообщений: {e}")
-        
-            
+                  
     def _cleanup_old_peers(self):
         """Очистка старых записей о пирах"""
         current_time = time.time()
@@ -989,9 +1192,7 @@ class P2PNetworkClient(QObject):
         if message_type == 'chat_message':
             self._handle_chat_message(data, peer_id)
         elif message_type == 'message_ack':
-            self._handle_message_ack(data)
-        elif message_type == 'user_online':
-            self._handle_user_online(data, peer_id)    
+            self._handle_message_ack(data)   
         elif message_type == 'message':
             self._handle_message(data)
         elif message_type == 'user_online':
@@ -1374,6 +1575,67 @@ class P2PNetworkClient(QObject):
             # Обрабатываем отключение
             self._handle_peer_disconnection(peer_id)
 
+    def setup_simple_media_connection(self, call_id: str, peer_username: str) -> bool:
+        """Упрощенная установка медиа-соединения"""
+        try:
+            logger.info(f"🔊 Упрощенная настройка медиа для звонка {call_id} с {peer_username}")
+            
+            # Создаем простой сокет для звонка
+            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            
+            # Находим свободный порт
+            call_port = self._find_free_call_port()
+            if not call_port:
+                logger.error("❌ Не удалось найти свободный порт для звонка")
+                return False
+        
+            # Привязываем сокет
+            call_socket.bind(('0.0.0.0', call_port))
+            call_socket.listen(1)
+            call_socket.settimeout(30.0)
+            
+            # Сохраняем сокет
+            self.media_sockets[call_id] = call_socket
+            
+            # Сохраняем информацию о звонке
+            if call_id not in self.call_requests:
+                self.call_requests[call_id] = {}
+            
+            self.call_requests[call_id]['media_port'] = call_port
+            self.call_requests[call_id]['media_socket'] = call_socket
+            self.call_requests[call_id]['status'] = 'listening'
+            
+            logger.info(f"✅ Упрощенное медиа-соединение создано для звонка {call_id} на порту {call_port}")
+            
+            # Отправляем информацию о порте другому пиру
+            target_peer = None
+            for peer_id, peer_info in list(self.connected_peers.items()):
+                if peer_info.get('username') == peer_username:
+                    target_peer = peer_info
+                    break
+        
+            if target_peer:
+                media_info = {
+                    'type': 'media_info',
+                    'call_id': call_id,
+                    'media_port': call_port,
+                    'action': 'simple_setup',
+                    'timestamp': time.time()
+                }
+            
+                success = self._send_to_peer(target_peer, media_info)
+                if success:
+                    logger.info(f"✅ Информация о медиа отправлена пиру {peer_username}")
+                else:
+                    logger.warning(f"⚠️ Не удалось отправить информацию о медиа пиру {peer_username}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка упрощенной настройки медиа: {e}")
+            return False
+
     def _send_to_peer(self, peer_info: Dict, data: dict) -> bool:
         """Отправка данных пиру"""
         try:
@@ -1546,6 +1808,52 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"❌ Ошибка обработки ответа на звонок: {e}")
 
+    def get_call_socket(self, call_id: str):
+        """Получение сокета для звонка (обертка для get_media_socket)"""
+        try:
+            logger.info(f"🔧 P2PNetworkClient.get_call_socket: Получение сокета для звонка {call_id}")
+            
+            # Пробуем получить медиа-сокет
+            media_socket = self.get_media_socket(call_id)
+            
+            if media_socket:
+                logger.info(f"✅ Получен медиа-сокет для звонка {call_id}")
+                return media_socket
+            
+            # Если медиа-сокета нет, создаем временный сокет для тестирования
+            logger.info(f"🔄 Создание временного сокета для звонка {call_id}")
+            
+            # Создаем простой TCP сокет
+            temp_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            temp_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            temp_socket.settimeout(30.0)
+            
+            # Находим свободный порт
+            temp_port = self._find_free_call_port()
+            if temp_port:
+                try:
+                    temp_socket.bind(('0.0.0.0', temp_port))
+                    temp_socket.listen(1)
+                    logger.info(f"✅ Создан временный сокет для звонка {call_id} на порту {temp_port}")
+                    
+                    # Сохраняем для последующего использования
+                    if call_id not in self.media_sockets:
+                        self.media_sockets[call_id] = temp_socket
+                    
+                    return temp_socket
+                except Exception as e:
+                    logger.error(f"❌ Ошибка создания временного сокета: {e}")
+                    temp_socket.close()
+            else:
+                logger.error("❌ Не удалось найти свободный порт для временного сокета")
+                temp_socket.close()
+            
+            return None
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка получения сокета для звонка: {e}")
+            return None
+    
     def setup_media_connection(self, call_id: str, peer_username: str) -> bool:
         """Установка медиа-соединения для звонка через медиа-сервер"""
         try:
@@ -1562,8 +1870,6 @@ class P2PNetworkClient(QObject):
                 logger.error(f"❌ Пир {peer_username} не найден в подключенных")
                 return False
         
-            # Получаем адрес пира
-            peer_host, peer_port = target_peer['address']
 
             # Создаем серверный сокет для медиа-данных
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -1592,18 +1898,20 @@ class P2PNetworkClient(QObject):
                 'server_socket': server_socket,
                 'port': media_port,
                 'peer_username': peer_username,
-                'peer_host': peer_host,
                 'status': 'listening',
-                'client_socket': None,
-                'connected_at': None
+                'connected_at': time.time()
             }
+
+            # Сохраняем сокет для быстрого доступа
+            self.media_sockets[call_id] = server_socket
 
             # Отправляем информацию о медиа-порте другому пиру
             media_info_msg = {
                 'type': 'media_info',
                 'call_id': call_id,
                 'media_port': media_port,
-                'action': 'setup'
+                'action': 'setup',
+                'timestamp': time.time()
             }
 
             # Отправляем через существующее соединение
@@ -1623,12 +1931,16 @@ class P2PNetworkClient(QObject):
                 return True
             else:
                 logger.error(f"❌ Не удалось отправить информацию о медиа-порте")
-                server_socket.close()
-                del self.media_connections[call_id]
+                if call_id in self.media_connections:
+                    del self.media_connections[call_id]
+                if call_id in self.media_sockets:
+                    del self.media_sockets[call_id]
                 return False
  
         except Exception as e:
             logger.error(f"❌ Критическая ошибка настройки медиа-соединения: {e}")
+            import traceback
+            logger.error(f"Трассировка: {traceback.format_exc()}")
             return False
            
     def _handle_media_data(self, call_id: str, media_socket: socket.socket):
@@ -1775,7 +2087,7 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Ошибка получения медиа-сокета: {e}")
             return None
 
-    def _find_free_media_port(self):
+    def _find_free_call_port(self):
         """Найти свободный порт для медиа"""
         for port in range(9100, 9500):
             if port not in self.media_ports:
