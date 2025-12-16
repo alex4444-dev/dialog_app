@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QProgressBar, QMessageBox,
                              QComboBox, QGroupBox, QScrollArea, QSizePolicy)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtGui import QPalette, QColor, QPainter
 import logging
 import time
 import struct
@@ -95,9 +96,32 @@ class CallWindow(QWidget):
         self.resize(600, 700)
         self.setWindowFlags(Qt.WindowStaysOnTopHint)
         
-        # УБИРАЕМ ПРОЗРАЧНОСТЬ - устанавливаем полностью непрозрачное окно
+        # убираем прозрачность
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setWindowOpacity(1.0)  # 100% непрозрачность
+        self.setAutoFillBackground(True)
+        palette = self.palette()
+        palette.setColor(QPalette.Window, QColor(255, 255, 255))
+        self.setPalette(palette)
+
+        
+
+        # Устанавливаем стиль для полной непрозрачности
+        self.setStyleSheet("""
+            QGroupBox {
+                background-color: #f8f9fa;
+                border: 2px solid #dee2e6;
+                border-radius: 8px;
+                margin-top: 10px;
+                padding-top: 10px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+            }
+        """)
 
         # Главный layout
         main_layout = QVBoxLayout()
@@ -115,7 +139,7 @@ class CallWindow(QWidget):
         # Информация о звонке
         info_label = QLabel(f"Пользователь: {self.username}\nТип: {self.call_type}\nID: {self.call_id}")
         info_label.setAlignment(Qt.AlignCenter)
-        info_label.setStyleSheet("font-size: 14px; color: #34495e; margin-bottom: 10px;")
+        info_label.setStyleSheet("font-size: 14px; color: #ffffff; margin-bottom: 10px;")
         info_label.setWordWrap(True)
         main_layout.addWidget(info_label)
         
@@ -128,7 +152,7 @@ class CallWindow(QWidget):
         # Информация о звуковой системе
         self.audio_system_label = QLabel("Определение звуковой системы...")
         self.audio_system_label.setAlignment(Qt.AlignCenter)
-        self.audio_system_label.setStyleSheet("font-size: 11px; color: #7f8c8d; font-style: italic; margin-bottom: 5px;")
+        self.audio_system_label.setStyleSheet("font-size: 14px; color: #7f8c8d; font-style: italic; margin-bottom: 5px;")
         self.audio_system_label.setWordWrap(True)
         audio_layout.addWidget(self.audio_system_label)
         
@@ -177,28 +201,28 @@ class CallWindow(QWidget):
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
-        self.audio_status_label.setStyleSheet("font-size: 18px; color: #7f8c8d; margin: 10px 0;")
+        self.audio_status_label.setStyleSheet("font-size: 16px; color: #7f8c8d; margin: 12px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
         
         # Индикатор состояния сокета
         self.socket_status_label = QLabel("🔴 Сокет: не установлен")
         self.socket_status_label.setAlignment(Qt.AlignCenter)
-        self.socket_status_label.setStyleSheet("font-size: 18px; color: #e74c3c; margin: 5px 0;")
+        self.socket_status_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #f8f9fa; padding: 5px; border-radius: 4px;")
         self.socket_status_label.setWordWrap(True)
         main_layout.addWidget(self.socket_status_label)
         
         # Диагностическая информация
         self.diagnostic_label = QLabel("Ожидание установки соединения...")
         self.diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.diagnostic_label.setStyleSheet("font-size: 18px; color: #e74c3c; margin: 5px 0;")
+        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #f8f9fa; padding: 5px; border-radius: 4px;")
         self.diagnostic_label.setWordWrap(True)
         main_layout.addWidget(self.diagnostic_label)
         
         # Детальная диагностика
         self.detailed_diagnostic_label = QLabel("")
         self.detailed_diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.detailed_diagnostic_label.setStyleSheet("font-size: 14px; color: #95a5a6; margin: 5px 0;")
+        self.detailed_diagnostic_label.setStyleSheet("font-size: 12px; color: #7f8c8d; margin: 8px 0; font-style: italic; background-color: #f8f9fa; padding: 4px; border-radius: 4px;")
         self.detailed_diagnostic_label.setWordWrap(True)
         main_layout.addWidget(self.detailed_diagnostic_label)
         
@@ -270,14 +294,14 @@ class CallWindow(QWidget):
         # Таймер звонка
         self.duration_label = QLabel("00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
-        self.duration_label.setStyleSheet("font-size: 24px; font-weight: bold; color: #27ae60; margin: 10px 0;")
+        self.duration_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #27ae60; background-color: #f8f9fa; padding: 10px; border-radius: 8px; margin: 10px 0; border: 2px solid #dee2e6;")
         self.duration_label.setVisible(False)
         main_layout.addWidget(self.duration_label)
         
         # Статус звонка
         self.status_label = QLabel("Набор номера..." if self.is_outgoing else "Входящий вызов...")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 12px; color: #7f8c8d; margin: 10px 0;")
+        self.status_label.setStyleSheet("font-size: 16px; color: #2c3e50; margin: 10px 0; font-weight: 500; padding: 8px; background-color: #e8f4fc; border-radius: 6px;")
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
         
@@ -757,13 +781,13 @@ class CallWindow(QWidget):
                     output_name = output_name[:27] + "..."
                     
                 self.audio_status_label.setText(f"🔊 Ввод: {input_name}\n🔊 Вывод: {output_name}")
-                self.audio_status_label.setStyleSheet("font-size: 11px; color: #27ae60;")
+                self.audio_status_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 12px 0; font-weight: 500; background-color: #e8f4fc; padding: 10px; border-radius: 6px;")
             except:
                 self.audio_status_label.setText(f"🔊 Аудио: ввод {self.input_device}, вывод {self.output_device}")
-                self.audio_status_label.setStyleSheet("font-size: 11px; color: #27ae60;")
+                self.audio_status_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 12px 0; font-weight: 500; background-color: #e8f4fc; padding: 10px; border-radius: 6px;")
         else:
             self.audio_status_label.setText("🔊 Аудио: автовыбор устройств")
-            self.audio_status_label.setStyleSheet("font-size: 11px; color: #e67e22;")
+            self.audio_status_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 12px 0; font-weight: 500; background-color: #fef9e7; padding: 10px; border-radius: 6px;")
 
     def test_call_tones(self):
         """Тестирование гудков звонка на текущих устройствах"""
@@ -818,21 +842,31 @@ class CallWindow(QWidget):
         if self.local_mode:
             socket_status = "🟡"
             socket_text = "локальный режим"
-        
+    
         self.socket_status_label.setText(f"{socket_status} Сокет: {socket_text}")
         
         if socket_ok and not self.local_mode:
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+            self.socket_status_label.setStyleSheet("font-size: 16px; color: #27ae60; font-weight: 500;")
         elif self.local_mode:
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+            self.socket_status_label.setStyleSheet("font-size: 16px; color: #e67e22; font-weight: 500;")
         else:
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
+            self.socket_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; font-weight: 500;")
         
         if self.is_active:
             audio_status = "🔊" if self.audio_initialized else "🔇"
             
-            info = f"{audio_status} Аудио | {socket_status} Сокет | Отпр: {self.sent_packets} | Получ: {self.received_packets}"
+            # Форматируем информацию более читаемо
+            info = f"{audio_status} Аудио активен | {socket_status} Соединение | 📤 {self.sent_packets} | 📥 {self.received_packets}"
             self.diagnostic_label.setText(info)
+            self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #e8f4fc; padding: 8px; border-radius: 6px;")
+            
+            # Обновляем статус аудио
+            if self.audio_initialized:
+                self.audio_status_label.setText("🔊 Аудио активно")
+                self.audio_status_label.setStyleSheet("font-size: 16px; color: #27ae60; margin: 12px 0; font-weight: 500;")
+            else:
+                self.audio_status_label.setText("🔇 Аудио отключено")
+                self.audio_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; margin: 12px 0; font-weight: 500;")
             
             # Детальная диагностика каждые 5 секунд
             if current_time - self.last_audio_debug_time > 5:
@@ -842,19 +876,25 @@ class CallWindow(QWidget):
             # Показываем информацию о состоянии когда звонок не активен
             if self.audio_available:
                 if self.audio_initialized:
-                    self.diagnostic_label.setText("✅ Аудио система готова")
-                    self.diagnostic_label.setStyleSheet("font-size: 10px; color: #27ae60;")
+                    self.diagnostic_label.setText("✅ Аудио система готова к работе")
+                    self.diagnostic_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 8px 0; font-weight: 500; background-color: #e8f4fc; padding: 8px; border-radius: 6px;")
+                    self.audio_status_label.setText("🔊 Аудио готово")
+                    self.audio_status_label.setStyleSheet("font-size: 16px; color: #27ae60; margin: 12px 0; font-weight: 500;")
                 else:
                     if not socket_ok:
-                        self.diagnostic_label.setText("⚠️ Ожидание установки сокета...")
-                        self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e67e22;")
+                        self.diagnostic_label.setText("⚠️ Ожидание установки соединения...")
+                        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 8px 0; font-weight: 500; background-color: #fef9e7; padding: 8px; border-radius: 6px;")
                     else:
                         self.diagnostic_label.setText("⚠️ Аудио система обнаружена, но не инициализирована")
-                        self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e67e22;")
+                        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 8px 0; font-weight: 500; background-color: #fef9e7; padding: 8px; border-radius: 6px;")
+                    self.audio_status_label.setText("🔇 Аудио: ожидание")
+                    self.audio_status_label.setStyleSheet("font-size: 16px; color: #e67e22; margin: 12px 0; font-weight: 500;")
             else:
                 self.diagnostic_label.setText("❌ Аудио система недоступна")
-                self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-    
+                self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e74c3c; margin: 8px 0; font-weight: 500; background-color: #fdedec; padding: 8px; border-radius: 6px;")
+                self.audio_status_label.setText("🔇 Аудио недоступно")
+                self.audio_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; margin: 12px 0; font-weight: 500;")
+
     def debug_audio_streams(self):
         """Детальная диагностика аудио потоков"""
         try:
@@ -1904,3 +1944,9 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.error(f"❌ Критическая ошибка при закрытии окна звонка: {e}")
             event.accept()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.fillRect(self.rect(), self.palette().color(QPalette.Window))
+        super().paintEvent(event)
