@@ -25,6 +25,7 @@ try:
     from chat_window import ChatWindow
     from notifications import NotificationWindow
     from call_window import CallWindow
+    from video_window import VideoCallWindow
     from storage.database import ClientDatabase
     from core.auth_manager import AuthManager
 except ImportError as e:
@@ -583,8 +584,11 @@ class P2PMainWindow(QMainWindow):
         self.system_chat.append(f"🔊 Сигнал звонка: {action} от {from_user}")
 
         if action == 'incoming_call':
-            self.handle_incoming_call_request(from_user, call_type, call_id)
-            
+            if call_type == 'video':
+                self.handle_incoming_video_call(from_user, call_id)
+            else:
+                self.handle_incoming_call_request(from_user, call_type, call_id)
+                
         elif action == 'call_accepted':
             self.handle_call_accepted(from_user, call_id)
             
@@ -1519,6 +1523,105 @@ class P2PMainWindow(QMainWindow):
             import traceback
             logger.error(f"Трассировка: {traceback.format_exc()}")
             self.system_chat.append(f"❌ Ошибка создания окна звонка: {e}")
+
+    def handle_incoming_video_call(self, from_user, call_id):
+        """Обработка входящего видеозвонка"""
+        try:
+            logger.info(f"=== ОБРАБОТКА ВХОДЯЩЕГО ВИДЕОЗВОНКА {call_id} ОТ {from_user} ===")
+            
+            if call_id in self.active_calls:
+                logger.warning(f"Дублирующий видеозвонок {call_id}, игнорируем")
+                return
+
+            # Создаем окно видеозвонка
+            video_window = VideoCallWindow(from_user, call_id, is_outgoing=False, parent=self)
+            video_window.call_ended.connect(self.end_call)
+            video_window.call_accepted.connect(self.accept_call)
+            video_window.call_rejected.connect(self.reject_call)
+            
+            # Сохраняем информацию о звонке
+            self.active_calls[call_id] = {
+                'window': video_window,
+                'username': from_user,
+                'type': 'video',
+                'outgoing': False,
+                'status': 'incoming'
+            }
+
+            # Получаем сокет для видео
+            if self.p2p_client:
+                logger.info(f"🔧 Настройка видео-соединения для входящего звонка {call_id}")
+                
+                # Создаем видео сокет
+                video_socket = self.p2p_client.setup_video_connection(call_id, from_user)
+                
+                if video_socket:
+                    logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
+                    video_window.set_video_socket(video_socket)
+            
+            # Показываем окно
+            video_window.show()
+            video_window.raise_()
+            video_window.activateWindow()
+            
+            # Показываем уведомление
+            self.show_notification(
+                f"📹 Входящий видеозвонок",
+                f"Пользователь {from_user} звонит вам с видео"
+            )
+        
+            logger.info(f"✅ Окно видеозвонка {call_id} показано")
+            self.system_chat.append(f"📹 Входящий видеозвонок от {from_user}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания окна видеозвонка: {e}")
+            self.system_chat.append(f"❌ Ошибка создания окна видеозвонка: {e}")
+
+    def start_video_call(self, username):
+        """Начать видеозвонок с пользователем"""
+        if not self.p2p_client:
+            QMessageBox.warning(self, 'Ошибка', 'P2P клиент не инициализирован')
+            return
+            
+        # Отправляем запрос на видеозвонок
+        call_id = self.p2p_client.send_call_request(username, 'video')
+        if not call_id:
+            QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на видеозвонок')
+            return
+
+        # Создаем окно видеозвонка
+        video_window = VideoCallWindow(username, call_id, is_outgoing=True, parent=self)
+        video_window.call_ended.connect(self.end_call)
+        
+        # Сохраняем информацию о звонке
+        self.active_calls[call_id] = {
+            'window': video_window,
+            'username': username,
+            'type': 'video',
+            'outgoing': True,
+            'status': 'pending'
+        }
+
+        # Настраиваем видео-соединение
+        logger.info("🔧 Настройка видео-соединения для исходящего звонка...")
+        
+        # Получаем сокет для видео
+        video_socket = self.p2p_client.setup_video_connection(call_id, username)
+        
+        if video_socket:
+            logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
+            video_window.set_video_socket(video_socket)
+        else:
+            logger.warning(f"⚠️ Не удалось получить видео-сокет для звонка {call_id}")
+            self.system_chat.append(f"⚠️ Видеозвонок начат, но видео соединение не установлено")
+
+        # Показываем окно
+        video_window.show()
+        video_window.raise_()
+        video_window.activateWindow()
+        
+        logger.info(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
+        self.system_chat.append(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
 
     def handle_call_accepted(self, from_user, call_id):
         """Обработка принятия звонка другим пользователем"""

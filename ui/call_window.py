@@ -94,7 +94,7 @@ class CallWindow(QWidget):
         self.setMinimumSize(550, 650)
         self.setMaximumSize(800, 900)
         self.resize(600, 700)
-        self.setWindowFlags(Qt.WindowStaysOnTopHint)
+        
         
         # убираем прозрачность
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -136,12 +136,35 @@ class CallWindow(QWidget):
         title_label.setWordWrap(True)
         main_layout.addWidget(title_label)
         
+        # Кнопка видеозвонка (только для исходящих)
+        if self.is_outgoing:
+            self.video_button = QPushButton("📹 Видеозвонок")
+            self.video_button.setFixedHeight(45)
+            self.video_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #9b59b6;
+                    color: white;
+                    border: none;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: #8e44ad;
+                }
+            """)
+            self.video_button.clicked.connect(self.upgrade_to_video)
+            buttons_layout.addWidget(self.video_button)
+
         # Информация о звонке
         info_label = QLabel(f"Пользователь: {self.username}\nТип: {self.call_type}\nID: {self.call_id}")
         info_label.setAlignment(Qt.AlignCenter)
         info_label.setStyleSheet("font-size: 14px; color: #ffffff; margin-bottom: 10px;")
         info_label.setWordWrap(True)
         main_layout.addWidget(info_label)
+
+
         
         # Группа выбора аудиоустройств
         audio_group = QGroupBox("Настройки аудио")
@@ -1817,6 +1840,27 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.debug(f"Ошибка обновления длительности: {e}")
     
+    def upgrade_to_video(self):
+        """Обновление до видеозвонка"""
+        try:
+            reply = QMessageBox.question(
+                self, 
+                'Перейти на видеозвонок',
+                'Вы хотите перейти на видеозвонок?\nЭто потребует согласия собеседника.',
+                QMessageBox.Yes | QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Закрываем текущий аудиозвонок
+                self.end_call()
+                
+                # Отправляем запрос на видеозвонок через родительское окно
+                if self.parent():
+                    self.parent().start_video_call(self.username)
+                    
+        except Exception as e:
+            logger.error(f"Ошибка перехода на видеозвонок: {e}")
+
     def accept_call(self):
         """Принять входящий звонок"""
         try:
