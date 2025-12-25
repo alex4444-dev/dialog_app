@@ -4,8 +4,34 @@ network:
   max_port_attempts: 100
   bootstrap_nodes:
     - {"host": "192.168.0.109", "port": 9005}
+    - {"host": "192.168.0.105", "port": 9002}
     - {"host": "localhost", "port": 9000}
   connection_timeout: 30
+
+
+# НОВЫЕ СЕКЦИИ ДЛЯ ЗВОНКОВ:
+media:
+  # Аудио-кодек (например, Opus, PCMU)
+  audio_codec: "opus"
+  # Битрейт аудио в кбит/с
+  audio_bitrate: 128
+  # Частота дискретизации в Гц
+  audio_sample_rate: 48000
+
+# STUN/TURN серверы для установления P2P-соединения
+  ice_servers:
+    - {"urls": "stun:stun.l.google.com:19302"}
+    - {"urls": "stun:stun1.l.google.com:19302"}
+    - {"urls": "stun:stun.ya.ru:3478"}
+    - {"urls": "stun:stun.calls.yandex.ru:3478"}
+    - {"urls": "stun:stun.mail.ru:3478"}
+    
+
+
+# Внутренние порты для RTP/RTCP (аудио/видео потоков)
+  rtp_port_range:
+    min: 10000
+    max: 20000
 
 database:
   path: "./data/client.db"
