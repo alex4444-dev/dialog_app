@@ -3,9 +3,8 @@ network:
   max_port: 10000
   max_port_attempts: 100
   bootstrap_nodes:
-    - {"host": "192.168.0.109", "port": 9005}
-    - {"host": "192.168.0.105", "port": 9002}
-    - {"host": "localhost", "port": 9000}
+   # - {"host": "0.0.0.0", "port": 9000}
+    - {"host": "192.168.0.109", "port": 8888}
   connection_timeout: 30
 
 

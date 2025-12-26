@@ -83,10 +83,12 @@ class P2PNetworkClient(QObject):
         self.listener_socket = None
         self.peer_exchange_interval = 30  # секунды между обменами
         self.last_peer_exchange = 0
+
+        self.media_ports = set()  # Для отслеживания используемых медиа-портов
         
         # Bootstrap узлы для первоначального подключения
         self.bootstrap_nodes = [
-            {"host": "localhost", "port": 8888},
+            {"host": "192.168.0.109", "port": 8888}
             # Можно добавить публичные bootstrap узлы
         ] 
 
@@ -247,7 +249,35 @@ class P2PNetworkClient(QObject):
         self._save_known_peers()
         
         logger.info("P2P клиент остановлен")
-    
+       
+    def simple_connect(self, target_host, target_port):
+        """Простое прямое подключение к другому компьютеру"""
+        try:
+            logger.info(f"🔗 Прямое подключение к {target_host}:{target_port}")
+            
+            # Подключаемся напрямую
+            if self._connect_to_peer(target_host, target_port):
+                logger.info(f"✅ Успешное прямое подключение к {target_host}:{target_port}")
+                
+                # Отправляем информацию о себе
+                self_info = {
+                    'type': 'user_online',
+                    'username': self.username,
+                    'timestamp': time.time()
+                }
+            
+                peer_key = f"{target_host}:{target_port}"
+                if peer_key in self.connected_peers:
+                    self._send_to_peer(self.connected_peers[peer_key], self_info)
+                
+                return True
+            
+            return False
+        
+        except Exception as e:
+            logger.error(f"❌ Ошибка прямого подключения: {e}")
+            return False
+        
     def register_with_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
         """Синхронная регистрация в bootstrap сервере"""
         try:
@@ -828,6 +858,8 @@ class P2PNetworkClient(QObject):
         disconnected_peers = []
         
         for peer_id, peer_info in list(self.connected_peers.items()):
+            peer_username = peer_info.get('username', 'unknown')
+
             # Если пир не активен более 60 секунд, считаем его отключенным
             if current_time - peer_info.get('last_seen', 0) > 60:
                 logger.info(f"🔌 Пир {peer_username} ({peer_id}) отключен по таймауту активности")
@@ -871,6 +903,16 @@ class P2PNetworkClient(QObject):
                 
                 logger.info(f"🔌 Пир {username} ({peer_id}) полностью отключен")
                 
+                # ⭐ ДОБАВЛЕНО: Удаляем из known_peers, чтобы не пытаться переподключаться
+                host_port = peer_id.split(':')
+                if len(host_port) == 2:
+                    host, port = host_port
+                    port = int(port)
+                    self.known_peers = [
+                        p for p in self.known_peers 
+                        if not (p.get('host') == host and p.get('port') == port)
+                    ]
+                    
                 # Обновляем список пользователей
                 online_users = self.get_online_users()
                 self.user_list_updated.emit(online_users)
@@ -1623,6 +1665,24 @@ class P2PNetworkClient(QObject):
         """Обработка уведомления о входе пользователя"""
         username = data.get('username')
         if username and peer_id in self.connected_peers:
+
+            existing_peer = None
+            for pid, pinfo in list(self.connected_peers.items()):
+                if pinfo.get('username') == username and pid != peer_id:
+                    existing_peer = pid
+                    break
+        
+            # Если нашли дубликат (пользователь с таким именем уже подключен под другим peer_id)
+            if existing_peer:
+                logger.warning(f"⚠️ Обнаружен дубликат пользователя {username}: {existing_peer} и {peer_id}")
+                # Закрываем старое соединение
+                try:
+                    self.connected_peers[existing_peer]['socket'].close()
+                except:
+                    pass
+                # Удаляем старую запись
+                del self.connected_peers[existing_peer]
+            
             self.connected_peers[peer_id]['username'] = username
             self.connected_peers[peer_id]['last_seen'] = time.time()
             
@@ -1889,23 +1949,36 @@ class P2PNetworkClient(QObject):
     
     def get_online_users(self) -> List[Dict]:
         """Получение списка онлайн пользователей с улучшенным логированием"""
-        online_users = []
+        try:
+            online_users = []
+            seen_usernames = set()  # Для отслеживания уникальных имен
 
-        # Пользователи из подключенных пиров
-        for peer_id, peer_info in list(self.connected_peers.items()):
-            if peer_info.get('username'):
-                user_data = {
-                    'username': peer_info['username'],
-                    'host': peer_info['address'][0],
-                    'port': peer_info['address'][1],
-                    'status': 'connected',
-                    'last_seen': peer_info.get('last_seen', time.time())
-                }
-                online_users.append(user_data)
-                logger.debug(f"📋 Добавлен в онлайн: {peer_info['username']})")
+            # Пользователи из подключенных пиров
+            for peer_id, peer_info in list(self.connected_peers.items()):
+                try:
+                    username = peer_info.get('username')
+                    if username and username not in seen_usernames:
+                        seen_usernames.add(username)
+                        
+                        user_data = {
+                            'username': username,
+                            'host': peer_info['address'][0],
+                            'port': peer_info['address'][1],
+                            'status': 'connected',
+                            'last_seen': peer_info.get('last_seen', time.time()),
+                            'peer_id': peer_id
+                        }
+                        online_users.append(user_data)
+                        logger.debug(f"📋 Добавлен в онлайн: {username} ({peer_id})")
+                except Exception as e:
+                    logger.error(f"❌ Ошибка обработки пира {peer_id}: {e}")
 
-        logger.debug(f"📊 get_online_users: {len(online_users)} пользователей онлайн")
-        return online_users
+            logger.debug(f"📊 get_online_users: {len(online_users)} уникальных пользователей онлайн")
+            return online_users
+        
+        except Exception as e:
+            logger.error(f"💥 Критическая ошибка в get_online_users: {e}")
+            return []  
 
     # Звонки
     def send_call_request(self, to_username: str, call_type: str) -> str:
@@ -1942,6 +2015,15 @@ class P2PNetworkClient(QObject):
             if target_peer:
                 if self._send_to_peer(target_peer, message):
                     logger.info(f"📞 Отправлен запрос на звонок {call_id} пользователю {to_username}")
+                    
+                    self.call_requests[call_id] = {
+                        'to_user': to_username,
+                        'call_type': call_type,
+                        'status': 'outgoing',
+                        'timestamp': time.time()
+                    }
+                    
+                    self.call_received.emit('outgoing_call', to_username, call_type or 'audio', call_id)
                     return call_id
                 else:
                     logger.error(f"❌ Не удалось отправить запрос на звонок пользователю {to_username}")
@@ -2308,13 +2390,16 @@ class P2PNetworkClient(QObject):
             return None
 
     def _find_free_call_port(self):
-        """Найти свободный порт для медиа"""
+        """Найти свободный порт для звонка"""
         for port in range(9100, 9500):
             if port not in self.media_ports:
                 try:
                     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                         s.bind(('0.0.0.0', port))
+                        # Добавляем порт в отслеживаемые
+                        if not hasattr(self, 'media_ports'):
+                            self.media_ports = set()
                         self.media_ports.add(port)
                         return port
                 except:
