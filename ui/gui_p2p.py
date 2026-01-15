@@ -1055,6 +1055,13 @@ class P2PMainWindow(QMainWindow):
         call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self)
         call_window.call_ended.connect(self.end_call)
         
+        # Установите родителя как None или self, чтобы окно было независимым
+        call_window.setParent(None)  # Раскомментируйте, если окно все еще не отображается
+
+
+        # Установите флаги окна, чтобы оно было поверх других окон
+        call_window.setWindowFlags(call_window.windowFlags() | Qt.WindowStaysOnTopHint)
+        
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
             'window': call_window,
@@ -1084,10 +1091,17 @@ class P2PMainWindow(QMainWindow):
             logger.warning(f"⚠️ Не удалось получить сокет для звонка {call_id}")
             self.system_chat.append(f"⚠️ Звонок начат, но аудио соединение не установлено")
 
+        # Убедиться, что окно действительно видимо
+        logger.info(f"🔊 Отображаем окно звонка для {username}, ID: {call_id}")
+    
+        
         # Показываем окно
-        call_window.show()
+        call_window.show()  # Вместо show()
         call_window.raise_()
         call_window.activateWindow()
+
+        # Принудительно обновить отображение
+        QApplication.processEvents()
         
         logger.info(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
         self.system_chat.append(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
@@ -1189,6 +1203,16 @@ class P2PMainWindow(QMainWindow):
         
         except Exception as e:
             logger.error(f"❌ Ошибка завершения звонка {call_id}: {e}")
+
+    def show_all_active_calls(self):
+        """Показать все активные окна звонков"""
+        for call_id, call_info in self.active_calls.items():
+            window = call_info['window']
+            if window and hasattr(window, 'isVisible') and not window.isVisible():
+                logger.info(f"🔊 Принудительно показываем окно звонка {call_id}")
+                window.show()
+                window.raise_()
+                window.activateWindow()
 
     def show_network_info(self):
         """Показать информацию о P2P сети"""

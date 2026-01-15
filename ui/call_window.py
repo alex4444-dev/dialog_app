@@ -20,6 +20,7 @@ class CallWindow(QWidget):
     call_ended = pyqtSignal(str)
     call_accepted = pyqtSignal(str)
     call_rejected = pyqtSignal(str)
+    call_started = pyqtSignal(str)
     
     def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None):
         super().__init__(parent)
@@ -27,15 +28,8 @@ class CallWindow(QWidget):
         self.call_type = call_type
         self.call_id = call_id
         self.is_outgoing = is_outgoing
-
-        # Подключаем сигналы КОРРЕКТНО
-        if not is_outgoing:
-            # Для входящих звонков - подключаем сигналы принятия/отклонения
-            self.call_accepted.connect(self.accept_call)
-            self.call_rejected.connect(self.reject_call)
-        
-        # Сигнал завершения звонка всегда подключен
-        self.call_ended.connect(self.end_call)
+        self.call_socket = None
+        self.socket_set = False
 
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
 
@@ -342,11 +336,14 @@ class CallWindow(QWidget):
         buttons_layout = QHBoxLayout()
         buttons_layout.setSpacing(15)
         
+        
+
+
         if self.is_outgoing:
-            # Для исходящего звонка - только кнопка завершения
-            self.end_button = QPushButton("📞 Завершить")
-            self.end_button.setFixedHeight(45)
-            self.end_button.setStyleSheet("""
+            # Для исходящего звонка - только кнопка "Позвонить"
+            self.start_button = QPushButton("📞 Начать звонок")
+            self.start_button.clicked.connect(self.start_call)
+            self.start_button.setStyleSheet("""
                 QPushButton {
                     background-color: #e74c3c;
                     color: white;
@@ -360,13 +357,29 @@ class CallWindow(QWidget):
                     background-color: #c0392b;
                 }
             """)
-            self.end_button.clicked.connect(self.end_call)
-            buttons_layout.addWidget(self.end_button)
+            buttons_layout.addWidget(self.start_button)
+
+            self.cancel_button = QPushButton("❌ Отмена")
+            self.cancel_button.clicked.connect(self.cancel_call)
+            self.cancel_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #f44336;
+                    color: white;
+                    font-size: 14px;
+                    padding: 10px;
+                    border-radius: 5px;
+                }
+                QPushButton:hover {
+                    background-color: #d32f2f;
+                }
+            """)
+            buttons_layout.addWidget(self.cancel_button)
             
         else:
             # Для входящего звонка - кнопки принятия и отклонения
             self.accept_button = QPushButton("✅ Принять")
-            self.accept_button.setFixedHeight(45)
+            self.accept_button.clicked.connect(self.accept_call)
+            
             self.accept_button.setStyleSheet("""
                 QPushButton {
                     background-color: #27ae60;
@@ -381,10 +394,10 @@ class CallWindow(QWidget):
                     background-color: #219a52;
                 }
             """)
-            self.accept_button.clicked.connect(self.safe_accept_call)
+            buttons_layout.addWidget(self.accept_button)
             
             self.reject_button = QPushButton("❌ Отклонить")
-            self.reject_button.setFixedHeight(45)
+            self.reject_button.clicked.connect(self.reject_call)
             self.reject_button.setStyleSheet("""
                 QPushButton {
                     background-color: #e74c3c;
@@ -399,27 +412,56 @@ class CallWindow(QWidget):
                     background-color: #c0392b;
                 }
             """)
-            self.reject_button.clicked.connect(self.safe_reject_call)
-            
-            buttons_layout.addWidget(self.accept_button)
             buttons_layout.addWidget(self.reject_button)
-        
+            
         main_layout.addLayout(buttons_layout)
         
         self.setLayout(main_layout)
         
+        # Кнопка завершения звонка (будет показана во время активного звонка)
+        self.end_button = QPushButton("📞 Завершить звонок")
+        self.end_button.clicked.connect(self.end_call)
+        self.end_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                font-size: 14px;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e68900;
+            }
+        """)
+        self.end_button.hide()  # Скрываем до начала звонка
+
+        # Кнопка завершения звонка (будет показана во время активного звонка)
+        self.end_button = QPushButton("📞 Завершить звонок")
+        self.end_button.clicked.connect(self.end_call)
+        self.end_button.setStyleSheet("""
+            QPushButton {
+                background-color: #ff9800;
+                color: white;
+                font-size: 14px;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #e68900;
+            }
+        """)
+        self.end_button.hide()
+        main_layout.addWidget(self.end_button)
+            
         # Настройка таймера для обновления длительности звонка
         self.duration_timer.timeout.connect(self.update_duration)
         
-        # Таймер для обновления диагностической информации
-        self.diagnostic_timer = QTimer()
-        self.diagnostic_timer.timeout.connect(self.update_diagnostic_info)
-        self.diagnostic_timer.start(1000)
-        
-        # Таймер для автоматической проверки сокета
-        self.socket_check_timer = QTimer()
-        self.socket_check_timer.timeout.connect(self.auto_check_socket)
-        self.socket_check_timer.start(2000)  # Проверка каждые 2 секунды
+        # Таймер для обновления времени звонка
+        self.socket_call_timer = QTimer()
+        self.socket_call_timer.timeout.connect(self.update_call_time)
+        self.socket_call_start_time = None  
+
+        logger.info(f"🔊 UI CallWindow инициализирован: is_outgoing={self.is_outgoing}")
     
     def debug_socket_state(self):
         """Расширенная диагностика состояния сокета"""
@@ -1372,11 +1414,25 @@ class CallWindow(QWidget):
                     logger.info(f"🔊 Fallback: комбинированное устройство {i}: {device['name']}")
                     break
 
+    def update_call_time(self):
+        """Обновление времени звонка"""
+        if self.call_start_time:
+            elapsed = int(time.time() - self.call_start_time)
+            minutes = elapsed // 60
+            seconds = elapsed % 60
+            self.time_label.setText(f"{minutes:02d}:{seconds:02d}")
+
     def start_call(self):
         """Начать звонок (после принятия)"""
         try:
-            logger.info(f"🔊 Запуск звонка {self.call_id}")
+            logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
             
+            # Меняем интерфейс
+            self.start_button.hide()
+            self.cancel_button.hide()
+            self.end_button.show()
+            self.time_label.show()
+
             # Проверяем наличие сокета
             if not self.call_socket:
                 logger.warning("⚠️ Сокет не установлен, пробуем получить от родителя")
@@ -1868,72 +1924,58 @@ class CallWindow(QWidget):
                 logger.warning(f"Звонок {self.call_id} уже принят")
                 return
                 
-            self.is_active = True
-            self.status_label.setText("Звонок принят")
             
-            # Скрываем кнопки принятия/отклонения
-            self.accept_button.setVisible(False)
-            self.reject_button.setVisible(False)
             
-            # Показываем кнопку завершения
-            self.end_button = QPushButton("📞 Завершить")
-            self.end_button.setFixedHeight(45)
-            self.end_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #c0392b;
-                }
-            """)
-            self.end_button.clicked.connect(self.end_call)
-            self.layout().addWidget(self.end_button)
+            # Меняем интерфейс
+            self.accept_button.hide()
+            self.reject_button.hide()
+            self.end_button.show()
+            self.time_label.show()
+
+            # Обновляем статус
+            self.status_label.setText("Звонок принят...")
+            self.title_label.setText("📞 Активный звонок")
             
-            # Запускаем звонок
-            self.start_call()
+            # Запускаем таймер
+            self.call_start_time = time.time()
+            self.call_timer.start(1000)
+
+            # Сигнализируем о принятии звонка
+            self.call_accepted.emit(self.call_id)
             
-            logger.info(f"Звонок {self.call_id} принят")
-            
+            # Логика принятия медиа-потока
+            if self.call_socket:
+                self.start_media_stream()
+                        
         except Exception as e:
             logger.error(f"Ошибка принятия звонка: {e}")
 
     def reject_call(self):
         """Отклонить входящий звонок"""
-        try:
-            self.status_label.setText("Звонок отклонен")
-            self.call_rejected.emit(self.call_id)
-            self.close()
-            
-            logger.info(f"Звонок {self.call_id} отклонен")
-            
-        except Exception as e:
-            logger.error(f"Ошибка отклонения звонка: {e}")
+        logger.info(f"🔊 Отклонение звонка {self.call_id}")
+        self.call_rejected.emit(self.call_id)
+        self.close()
     
     def end_call(self):
         """Завершить активный звонок"""
-        if getattr(self, 'call_ended_emitted', False):
-            return
-
-        try:
-            self.is_active = False
-            self.call_ended_emitted = True
-            self.duration_timer.stop()
-            self.diagnostic_timer.stop()
-            self.socket_check_timer.stop()
-            self.stop_audio_streams()
-            self.call_ended.emit(self.call_id)
+        logger.info(f"🔊 Завершение звонка {self.call_id}")
+        
+        # Останавливаем таймер
+        if self.call_timer.isActive():
+            self.call_timer.stop()
             
-            logger.info(f"Звонок {self.call_id} завершен")
-            
-        except Exception as e:
-            logger.error(f"Ошибка завершения звонка: {e}")
+        # Сигнализируем о завершении
+        self.call_ended.emit(self.call_id)
+        
+        # Закрываем окно
+        self.close()
     
+    def cancel_call(self):
+        """Отменить исходящий звонок"""
+        logger.info(f"🔊 Отмена звонка {self.call_id}")
+        self.call_ended.emit(self.call_id)
+        self.close()
+
     def show_audio_error(self, message):
         """Показать ошибку аудио"""
         self.diagnostic_label.setText(f"Ошибка: {message}")

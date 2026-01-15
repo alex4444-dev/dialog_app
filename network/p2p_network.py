@@ -88,7 +88,9 @@ class P2PNetworkClient(QObject):
         
         # Bootstrap узлы для первоначального подключения
         self.bootstrap_nodes = [
-            {"host": "192.168.0.109", "port": 8888}
+            #{"host": "192.168.0.109", "port": 8888}
+	        {"host": "localhost", "port": 8888}
+            
             # Можно добавить публичные bootstrap узлы
         ] 
 
