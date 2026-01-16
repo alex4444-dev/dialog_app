@@ -76,14 +76,39 @@ class CallWindow(QWidget):
         
         # Сначала инициализируем UI
         self.init_ui()
+
+        # Инициализируем недостающие виджеты
+        self.title_label = None
+        self.time_label = None
         
+
+        # Инициализируем таймеры
+        self.call_timer = QTimer()
+        self.socket_check_timer = QTimer()
+        self.socket_check_timer.timeout.connect(self.auto_check_socket)
+        self.diagnostic_timer = QTimer()
+        self.diagnostic_timer.timeout.connect(self.update_diagnostic_info)
+        
+        # Запускаем диагностический таймер
+        self.diagnostic_timer.start(1000)  # Обновлять каждую секунду
+    
+        # Запускаем проверку сокета (для исходящих звонков)
+        if is_outgoing:
+            QTimer.singleShot(1000, self.socket_check_timer.start)  # Запустить через секунду
+
         # Затем определяем аудио систему
         self.detect_audio_system()
+
+        self.show()  
+        self.raise_()  
+        self.activateWindow()  
 
         logger.info(f"🔊 CallWindow создано успешно")
         
     def init_ui(self):
         """Инициализация интерфейса окна звонка"""
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
+        
         self.setWindowTitle(f"📞 Звонок с {self.username}")
         self.setMinimumSize(550, 650)
         self.setMaximumSize(800, 900)
@@ -106,7 +131,7 @@ class CallWindow(QWidget):
                 border: 2px solid #dee2e6;
                 border-radius: 8px;
                 margin-top: 10px;
-                padding-top: 10px;
+                padding: 10px;
                 font-weight: bold;
                 font-size: 14px;
             }
@@ -124,32 +149,12 @@ class CallWindow(QWidget):
         
         # Заголовок
         title_text = "Исходящий звонок" if self.is_outgoing else "Входящий звонок"
-        title_label = QLabel(f"📞 {title_text}")
-        title_label.setAlignment(Qt.AlignCenter)
-        title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 10px;")
-        title_label.setWordWrap(True)
-        main_layout.addWidget(title_label)
+        self.title_label = QLabel(f"📞 {title_text}")
+        self.title_label.setAlignment(Qt.AlignCenter)
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 5px;")
+        self.title_label.setWordWrap(True)
+        main_layout.addWidget(self.title_label)
         
-        # Кнопка видеозвонка (только для исходящих)
-        if self.is_outgoing:
-            self.video_button = QPushButton("📹 Видеозвонок")
-            self.video_button.setFixedHeight(45)
-            self.video_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #9b59b6;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #8e44ad;
-                }
-            """)
-            self.video_button.clicked.connect(self.upgrade_to_video)
-            buttons_layout.addWidget(self.video_button)
 
         # Информация о звонке
         info_label = QLabel(f"Пользователь: {self.username}\nТип: {self.call_type}\nID: {self.call_id}")
@@ -163,13 +168,14 @@ class CallWindow(QWidget):
         # Группа выбора аудиоустройств
         audio_group = QGroupBox("Настройки аудио")
         audio_group.setStyleSheet("QGroupBox { font-weight: bold; }")
+        audio_group.setMinimumHeight(180)
         audio_layout = QVBoxLayout()
         audio_layout.setSpacing(8)
         
         # Информация о звуковой системе
         self.audio_system_label = QLabel("Определение звуковой системы...")
         self.audio_system_label.setAlignment(Qt.AlignCenter)
-        self.audio_system_label.setStyleSheet("font-size: 14px; color: #7f8c8d; font-style: italic; margin-bottom: 5px;")
+        self.audio_system_label.setStyleSheet("font-size: 14px; color: #7f8c8d; font-style: italic; margin-bottom: 10px;")
         self.audio_system_label.setWordWrap(True)
         audio_layout.addWidget(self.audio_system_label)
         
@@ -218,30 +224,33 @@ class CallWindow(QWidget):
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
-        self.audio_status_label.setStyleSheet("font-size: 16px; color: #7f8c8d; margin: 12px 0;")
+        self.audio_status_label.setStyleSheet("font-size: 16px; color: #7f8c8d; margin: 5px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
         
         # Индикатор состояния сокета
         self.socket_status_label = QLabel("🔴 Сокет: не установлен")
         self.socket_status_label.setAlignment(Qt.AlignCenter)
-        self.socket_status_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #f8f9fa; padding: 5px; border-radius: 4px;")
+        self.socket_status_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 5px 5; font-weight: 500; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
         self.socket_status_label.setWordWrap(True)
         main_layout.addWidget(self.socket_status_label)
         
         # Диагностическая информация
         self.diagnostic_label = QLabel("Ожидание установки соединения...")
         self.diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #f8f9fa; padding: 5px; border-radius: 4px;")
+        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 5px 0; font-weight: 500; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
         self.diagnostic_label.setWordWrap(True)
         main_layout.addWidget(self.diagnostic_label)
         
         # Детальная диагностика
         self.detailed_diagnostic_label = QLabel("")
         self.detailed_diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.detailed_diagnostic_label.setStyleSheet("font-size: 12px; color: #7f8c8d; margin: 8px 0; font-style: italic; background-color: #f8f9fa; padding: 4px; border-radius: 4px;")
+        self.detailed_diagnostic_label.setStyleSheet("font-size: 12px; color: #7f8c8d; margin: 5px 0; font-style: italic; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
         self.detailed_diagnostic_label.setWordWrap(True)
         main_layout.addWidget(self.detailed_diagnostic_label)
+        
+        # Добавляем растягивающийся элемент, чтобы диагностика не накладывалась
+        main_layout.addStretch(1)
         
         # Группа тестирования
         test_group = QGroupBox("Тестирование и диагностика")
@@ -334,9 +343,7 @@ class CallWindow(QWidget):
         
         # Кнопки управления звонком
         buttons_layout = QHBoxLayout()
-        buttons_layout.setSpacing(15)
-        
-        
+        buttons_layout.setSpacing(15) 
 
 
         if self.is_outgoing:
@@ -374,6 +381,28 @@ class CallWindow(QWidget):
                 }
             """)
             buttons_layout.addWidget(self.cancel_button)
+
+        # Кнопка видеозвонка (только для исходящих)
+        if self.is_outgoing:
+            self.video_button = QPushButton("📹 Видеозвонок")
+            self.video_button.setFixedHeight(45)
+            self.video_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #9b59b6;
+                    color: white;
+                    border: none;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                    font-size: 14px;
+                }
+                QPushButton:hover {
+                    background-color: #8e44ad;
+                }
+            """)
+            self.video_button.clicked.connect(self.upgrade_to_video)
+            buttons_layout.addWidget(self.video_button)
+
             
         else:
             # Для входящего звонка - кнопки принятия и отклонения
@@ -417,7 +446,17 @@ class CallWindow(QWidget):
         main_layout.addLayout(buttons_layout)
         
         self.setLayout(main_layout)
+
         
+        # Инициализировать call_timer
+        self.call_timer = QTimer()
+        self.call_timer.timeout.connect(self.update_call_time)
+            
+        # Инициализировать диагностический таймер
+        self.diagnostic_timer = QTimer()
+        self.diagnostic_timer.timeout.connect(self.update_diagnostic_info)
+        self.diagnostic_timer.start(1000)
+
         # Кнопка завершения звонка (будет показана во время активного звонка)
         self.end_button = QPushButton("📞 Завершить звонок")
         self.end_button.clicked.connect(self.end_call)
@@ -1431,7 +1470,7 @@ class CallWindow(QWidget):
             self.start_button.hide()
             self.cancel_button.hide()
             self.end_button.show()
-            self.time_label.show()
+            self.duration_label.setVisible(True)
 
             # Проверяем наличие сокета
             if not self.call_socket:

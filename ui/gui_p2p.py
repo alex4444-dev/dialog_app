@@ -1055,13 +1055,6 @@ class P2PMainWindow(QMainWindow):
         call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self)
         call_window.call_ended.connect(self.end_call)
         
-        # Установите родителя как None или self, чтобы окно было независимым
-        call_window.setParent(None)  # Раскомментируйте, если окно все еще не отображается
-
-
-        # Установите флаги окна, чтобы оно было поверх других окон
-        call_window.setWindowFlags(call_window.windowFlags() | Qt.WindowStaysOnTopHint)
-        
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
             'window': call_window,
@@ -1070,41 +1063,48 @@ class P2PMainWindow(QMainWindow):
             'outgoing': True,
             'status': 'pending'
         }
-
-        # Настраиваем медиа-соединение
-        logger.info("🔧 Настройка исходящего соединения для исходящего звонка...")
-        
-        # ВАЖНО: Получаем сокет для звонка
-        call_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
-        
-        if call_socket:
-            logger.info(f"✅ Исходящий сокет для звонка {call_id} создан")
-            
-            # Устанавливаем сокет в окне
-            success = call_window.set_call_socket(call_socket)
-            if success:
-                logger.info(f"✅ Сокет установлен для звонка {call_id}")
-            else:
-                logger.error(f"❌ Не удалось установить сокет для звонка {call_id}")
-                self.system_chat.append(f"⚠️ Звонок начат, но аудио может не работать")
-        else:
-            logger.warning(f"⚠️ Не удалось получить сокет для звонка {call_id}")
-            self.system_chat.append(f"⚠️ Звонок начат, но аудио соединение не установлено")
-
-        # Убедиться, что окно действительно видимо
-        logger.info(f"🔊 Отображаем окно звонка для {username}, ID: {call_id}")
-    
         
         # Показываем окно
-        call_window.show()  # Вместо show()
-        call_window.raise_()
-        call_window.activateWindow()
+        #call_window.show() 
+        #call_window.raise_()
+        #call_window.activateWindow()
 
         # Принудительно обновить отображение
         QApplication.processEvents()
         
-        logger.info(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
+        logger.info(f"📞 Отображаем окно звонка для {username}, ID: {call_id}")
         self.system_chat.append(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
+
+        # Настраиваем медиа-соединение (после показа окна)
+        QTimer.singleShot(500, lambda: self.setup_outgoing_media(call_id, username, call_window))
+        
+    def setup_outgoing_media(self, call_id, username, call_window):
+
+        """Настройка медиа для исходящего звонка"""
+        try:
+            logger.info("🔧 Настройка исходящего соединения для исходящего звонка...")
+            # Получаем сокет для звонка
+            call_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
+            
+            if call_socket:
+                logger.info(f"✅ Исходящий сокет для звонка {call_id} создан")
+                
+                # Устанавливаем сокет в окне
+                success = call_window.set_call_socket(call_socket)
+                if success:
+                    logger.info(f"✅ Сокет установлен для звонка {call_id}")
+                else:
+                    logger.error(f"❌ Не удалось установить сокет для звонка {call_id}")
+                    self.system_chat.append(f"⚠️ Звонок начат, но аудио может не работать")
+            else:
+                logger.warning(f"⚠️ Не удалось получить сокет для звонка {call_id}")
+                self.system_chat.append(f"⚠️ Звонок начат, но аудио соединение не установлено")
+            
+            logger.info(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
+            self.system_chat.append(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
+
+        except Exception as e:
+            logger.error(f"❌ Ошибка настройки медиа для исходящего звонка: {e}")
 
     def accept_call(self, call_id):
         """Принять входящий звонок"""
