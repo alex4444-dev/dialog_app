@@ -78,6 +78,10 @@ class P2PMainWindow(QMainWindow):
         # Для звонков
         self.active_calls = {}
         self.pending_calls = {}
+
+        # Для хранения сокетов звонков
+        self.call_sockets = {}  # Словарь для хранения сокетов по call_id
+
         
         # Таймеры для обновлений
         self.update_timer = QTimer()
@@ -757,6 +761,91 @@ class P2PMainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"P2PMainWindow.on_message_sent: Ошибка отправки сообщения: {e}")
 
+    def get_call_socket(self, call_id):
+        """Получить сокет для звонка по его ID"""
+        try:
+            logger.info(f"🔍 Запрос сокета для звонка {call_id}")
+            
+            # Проверяем в словаре call_sockets
+            if call_id in self.call_sockets:
+                socket = self.call_sockets[call_id]
+                if socket:
+                    logger.info(f"✅ Сокет найден в call_sockets для звонка {call_id}")
+                    return socket
+        
+            # Проверяем в активных звонках
+            if call_id in self.active_calls:
+                call_info = self.active_calls[call_id]
+
+                # Сначала проверяем поле 'socket'
+                if 'socket' in call_info and call_info['socket']:
+                    logger.info(f"✅ Сокет найден в active_calls для звонка {call_id}")
+                    return call_info['socket']
+            
+                # Затем проверяем, есть ли сокет в окне
+                if 'window' in call_info and call_info['window']:
+                    window = call_info['window']
+                    if hasattr(window, 'call_socket') and window.call_socket:
+                        logger.info(f"✅ Сокет найден в окне звонка {call_id}")
+                        return window.call_socket
+
+            # Пробуем получить от P2P клиента
+            if hasattr(self.p2p_client, 'get_call_socket'):
+                try:
+                    socket = self.p2p_client.get_call_socket(call_id)
+                    if socket:
+                        logger.info(f"✅ Сокет получен от P2P клиента для звонка {call_id}")
+                        return socket
+                except Exception as e:
+                    logger.error(f"❌ Ошибка получения сокета от P2P клиента: {e}")
+            
+            logger.warning(f"⚠️ Сокет не найден для звонка {call_id}")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Критическая ошибка в get_call_socket: {e}")
+            return None
+
+    def force_setup_socket(self, call_id):
+        """Принудительная установка сокета для звонка"""
+        try:
+            logger.info(f"🔄 Принудительная установка сокета для звонка {call_id}")
+            
+            if call_id not in self.active_calls:
+                logger.error(f"❌ Звонок {call_id} не найден")
+                return False
+                
+            call_info = self.active_calls[call_id]
+            call_window = call_info.get('window')
+            
+            if not call_window:
+                logger.error(f"❌ Окно звонка {call_id} не найдено")
+                return False
+                
+            # Если сокет уже установлен, ничего не делаем
+            if hasattr(call_window, 'socket_set') and call_window.socket_set:
+                logger.info(f"✅ Сокет уже установлен для звонка {call_id}")
+                return True
+                
+            # Получаем сокет
+            socket = self.get_call_socket(call_id)
+            if not socket:
+                logger.error(f"❌ Не удалось получить сокет для звонка {call_id}")
+                return False
+                
+            # Устанавливаем сокет
+            success = call_window.set_call_socket(socket)
+            if success:
+                logger.info(f"✅ Сокет принудительно установлен для звонка {call_id}")
+                return True
+            else:
+                logger.error(f"❌ Не удалось принудительно установить сокет для звонка {call_id}")
+                return False
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка принудительной установки сокета: {e}")
+            return False
+
     def show_incoming_call(self, call_id, from_user, call_type):
         """Показать окно входящего звонка"""
         try:
@@ -1063,7 +1152,11 @@ class P2PMainWindow(QMainWindow):
             'outgoing': True,
             'status': 'pending'
         }
-        
+
+        # НЕМЕДЛЕННО получаем и устанавливаем сокет (без задержки)
+        logger.info("🔧 Немедленная настройка медиа для исходящего звонка...")
+        QTimer.singleShot(100, lambda: self.setup_outgoing_media(call_id, username, call_window))
+            
         # Показываем окно
         #call_window.show() 
         #call_window.raise_()
@@ -1077,9 +1170,14 @@ class P2PMainWindow(QMainWindow):
 
         # Настраиваем медиа-соединение (после показа окна)
         QTimer.singleShot(500, lambda: self.setup_outgoing_media(call_id, username, call_window))
+
+        # Дополнительно: через 2 секунды принудительно устанавливаем сокет
+        QTimer.singleShot(2000, lambda: self.setup_call_socket_for_window(call_id))
+
+        # Через 3 секунды еще раз проверяем
+        QTimer.singleShot(3000, lambda: self.force_setup_socket(call_id))
         
     def setup_outgoing_media(self, call_id, username, call_window):
-
         """Настройка медиа для исходящего звонка"""
         try:
             logger.info("🔧 Настройка исходящего соединения для исходящего звонка...")
@@ -1089,10 +1187,20 @@ class P2PMainWindow(QMainWindow):
             if call_socket:
                 logger.info(f"✅ Исходящий сокет для звонка {call_id} создан")
                 
+                # Сохраняем сокет в словаре
+                self.call_sockets[call_id] = call_socket
+
+                # Сохраняем сокет в информации о звонке
+                if call_id in self.active_calls:
+                    self.active_calls[call_id]['socket'] = call_socket
+
                 # Устанавливаем сокет в окне
                 success = call_window.set_call_socket(call_socket)
                 if success:
                     logger.info(f"✅ Сокет установлен для звонка {call_id}")
+
+                    # Запускаем таймер для проверки, установился ли сокет
+                    QTimer.singleShot(1000, lambda: self.verify_socket_setup(call_id, call_window))
                 else:
                     logger.error(f"❌ Не удалось установить сокет для звонка {call_id}")
                     self.system_chat.append(f"⚠️ Звонок начат, но аудио может не работать")
@@ -1194,6 +1302,16 @@ class P2PMainWindow(QMainWindow):
                 # Останавливаем медиа соединение
                 self.p2p_client.close_media_connection(call_id)
             
+            # Удаляем сокет из словаря
+            if call_id in self.call_sockets:
+                try:
+                    socket = self.call_sockets[call_id]
+                    if socket:
+                        socket.close()
+                except:
+                    pass
+                del self.call_sockets[call_id]
+
             # Удаляем из активных звонков
             if call_id in self.active_calls:
                 del self.active_calls[call_id]
@@ -1203,6 +1321,62 @@ class P2PMainWindow(QMainWindow):
         
         except Exception as e:
             logger.error(f"❌ Ошибка завершения звонка {call_id}: {e}")
+
+    def verify_socket_setup(self, call_id, call_window):
+        """Проверка, что сокет успешно установлен в окне"""
+        try:
+            logger.info(f"🔍 Проверка установки сокета для звонка {call_id}")
+            
+            if not call_window.socket_set:
+                logger.warning(f"⚠️ Сокет не установлен в окне звонка {call_id}")
+                
+                # Пробуем еще раз получить сокет из словаря
+                if call_id in self.call_sockets:
+                    socket = self.call_sockets[call_id]
+                    if socket:
+                        logger.info(f"🔄 Повторная попытка установки сокета для {call_id}")
+                        success = call_window.set_call_socket(socket)
+                        if success:
+                            logger.info(f"✅ Сокет успешно установлен при повторной попытке")
+                        else:
+                            logger.error(f"❌ Не удалось установить сокет при повторной попытке")
+                else:
+                    logger.error(f"❌ Сокет не найден в словаре call_sockets")
+        except Exception as e:
+            logger.error(f"❌ Ошибка проверки установки сокета: {e}")
+
+    def setup_call_socket_for_window(self, call_id):
+        """Принудительно установить сокет в окне звонка"""
+        try:
+            if call_id not in self.active_calls:
+                logger.warning(f"⚠️ Звонок {call_id} не найден")
+                return False
+                
+            call_info = self.active_calls[call_id]
+            call_window = call_info.get('window')
+            
+            if not call_window:
+                logger.error(f"❌ Окно звонка {call_id} не найдено")
+                return False
+                
+            # Получаем сокет
+            socket = self.get_call_socket(call_id)
+            if not socket:
+                logger.error(f"❌ Не удалось получить сокет для звонка {call_id}")
+                return False
+                
+            # Устанавливаем сокет
+            success = call_window.set_call_socket(socket)
+            if success:
+                logger.info(f"✅ Сокет успешно установлен в окне звонка {call_id}")
+                return True
+            else:
+                logger.error(f"❌ Не удалось установить сокет в окне звонка {call_id}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка установки сокета: {e}")
+            return False
 
     def show_all_active_calls(self):
         """Показать все активные окна звонков"""
@@ -1388,8 +1562,7 @@ class P2PMainWindow(QMainWindow):
         """Показать начальную информацию о сети"""
         network_info = self.get_network_info()
         self.system_chat.append(f"📊 Сеть: {network_info.get('status')}, пиров: {network_info.get('connected_peers')}/{network_info.get('known_peers')}")
-    
-    
+       
     def setup_call_media(self, call_id, username, is_outgoing):
         """Упрощенная настройка медиа для звонка"""
         try:
@@ -1426,7 +1599,6 @@ class P2PMainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"❌ Ошибка настройки медиа: {e}")
             return False
-
 
     def update_network_status(self, is_connected: bool, peer_count: int):
         """Обновление статуса сети"""
@@ -1498,14 +1670,6 @@ class P2PMainWindow(QMainWindow):
             call_window.call_accepted.connect(self.accept_call)
             call_window.call_rejected.connect(self.reject_call)
             
-            # Сохраняем информацию о звонке
-            self.active_calls[call_id] = {
-                'window': call_window,
-                'username': from_user,
-                'type': call_type,
-                'outgoing': False,
-                'status': 'incoming'
-            }
 
             # Получаем или создаем сокет для звонка
             if self.p2p_client:
@@ -1518,7 +1682,7 @@ class P2PMainWindow(QMainWindow):
             
                 if call_socket:
                     logger.info(f"✅ Сокет для входящего звонка {call_id} создан")
-                    
+                    self.call_sockets[call_id] = call_socket
                     # Устанавливаем сокет в окне
                     success = call_window.set_call_socket(call_socket)
                     if success:
@@ -1527,6 +1691,15 @@ class P2PMainWindow(QMainWindow):
                         logger.error(f"❌ Не удалось установить сокет в окне звонка {call_id}")
                 else:
                     logger.error(f"❌ Не удалось создать сокет для входящего звонка {call_id}")
+            
+            # Сохраняем информацию о звонке
+            self.active_calls[call_id] = {
+                'window': call_window,
+                'username': from_user,
+                'type': call_type,
+                'outgoing': False,
+                'status': 'incoming'
+            }
             
             # Показываем окно
             call_window.show()

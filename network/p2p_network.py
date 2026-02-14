@@ -88,8 +88,8 @@ class P2PNetworkClient(QObject):
         
         # Bootstrap узлы для первоначального подключения
         self.bootstrap_nodes = [
-            #{"host": "192.168.0.109", "port": 8888}
-	        {"host": "localhost", "port": 8888}
+            {"host": "192.168.0.105", "port": 8888}
+	        #{"host": "localhost", "port": 8888}
             
             # Можно добавить публичные bootstrap узлы
         ] 
@@ -109,10 +109,7 @@ class P2PNetworkClient(QObject):
         self.media_sockets = {}  # call_id -> socket
         self.media_connections = {}  # call_id -> media_info
         self.call_requests = {}  # call_id -> call_info
-        
-        
-    
-    
+           
     def connect_to_peer_media(self, call_id, peer_username):
         """Подключение к медиа другого пользователя через центральный сервер"""
         try:
@@ -1174,115 +1171,53 @@ class P2PNetworkClient(QObject):
             return None
 
     def _create_outgoing_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
-        """Создание исходящего сокета для звонка"""
         try:
-            # Создаем сокет для звонка (используем порт 0 для автоматического выбора)
+            logger.info(f"🔧 [_create_outgoing_call_socket] Звонок {call_id}: попытка подключения к {peer_host}:{peer_port}")
             call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Находим свободный порт
             call_socket.bind(('0.0.0.0', 0))
             local_port = call_socket.getsockname()[1]
-            logger.info(f"🔧 Исходящий сокет привязан к порту {local_port}")
-            
-            # Подключаемся к пиру
+            logger.info(f"🔧 [_create_outgoing_call_socket] Звонок {call_id}: локальный порт {local_port}")
             call_socket.settimeout(10.0)
-            logger.info(f"🔧 Подключение к {peer_host}:{peer_port}...")
-            
-            try:
-                call_socket.connect((peer_host, peer_port))
-            except Exception as e:
-                logger.error(f"❌ Не удалось подключиться к {peer_host}:{peer_port}: {e}")
-                
-                # Пробуем обратный порт (peer_port + 1)
-                try:
-                    logger.info(f"🔄 Попытка подключения к порту {peer_port + 1}...")
-                    call_socket.close()
-                    
-                    call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    call_socket.bind(('0.0.0.0', 0))
-                    call_socket.settimeout(10.0)
-                    call_socket.connect((peer_host, peer_port + 1))
-                except Exception as e2:
-                    logger.error(f"❌ Вторая попытка подключения также не удалась: {e2}")
-                    call_socket.close()
-                    return None
-            
-            # Устанавливаем нормальный таймаут
+            call_socket.connect((peer_host, 9100))
+            logger.info(f"✅ [_create_outgoing_call_socket] Звонок {call_id}: подключение к {peer_host}:{peer_port} успешно")
             call_socket.settimeout(30.0)
             
-            # Отправляем информацию о звонке
-            call_info = {
-                'type': 'call_connect',
-                'call_id': call_id,
-                'action': 'connect',
-                'from': self.username
-            }
-            
+            # Отправка информации о звонке
+            call_info = {'type': 'call_connect', 'call_id': call_id, 'action': 'connect', 'from': self.username}
             call_socket.send(json.dumps(call_info).encode())
             
-            # Ждем подтверждения
             response = call_socket.recv(1024)
             if response:
                 resp = json.loads(response.decode())
                 if resp.get('status') == 'connected':
-                    logger.info(f"✅ Подключение для звонка {call_id} установлено")
-                    
-                    # Сохраняем сокет
+                    logger.info(f"✅ [_create_outgoing_call_socket] Звонок {call_id}: подтверждение получено")
                     self.media_sockets[call_id] = call_socket
                     return call_socket
-            
-            logger.error(f"❌ Не получено подтверждение подключения для звонка {call_id}")
+            logger.error(f"❌ [_create_outgoing_call_socket] Звонок {call_id}: нет подтверждения")
             call_socket.close()
             return None
-        
         except Exception as e:
-            logger.error(f"❌ Ошибка создания исходящего сокета: {e}")
+            logger.error(f"❌ [_create_outgoing_call_socket] Звонок {call_id}: ошибка: {e}")
             return None
 
     def _create_incoming_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
-        """Создание входящего сокета для звонка (серверный сокет)"""
         try:
-            # Создаем серверный сокет
+            # Используем peer_port + 1 для входящего сокета
+            listen_port = 9100
+            logger.info(f"🔧 [_create_incoming_call_socket] Звонок {call_id}: создаём серверный сокет на порту {listen_port}")
             server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Привязываем к порту peer_port + 1 (для входящих подключений)
-            listen_port = peer_port + 1
-            max_attempts = 10
-            
-            for attempt in range(max_attempts):
-                try:
-                    server_socket.bind(('0.0.0.0', listen_port))
-                    break
-                except OSError:
-                    listen_port += 1
-                    continue
-            else:
-                logger.error(f"❌ Не удалось найти свободный порт после {max_attempts} попыток")
-                return None
-            
+            server_socket.bind(('0.0.0.0', listen_port))
             server_socket.listen(1)
             server_socket.settimeout(30.0)
-            
-            logger.info(f"🔧 Серверный сокет создан на порту {listen_port}")
-            
-            # Сохраняем серверный сокет
+            logger.info(f"✅ [_create_incoming_call_socket] Звонок {call_id}: серверный сокет готов на порту {listen_port}")
             self.media_sockets[call_id] = server_socket
-            
-            # Запускаем поток для ожидания подключения
-            accept_thread = threading.Thread(
-                target=self._wait_for_call_connection,
-                args=(call_id, server_socket),
-                daemon=True
-            )
-            accept_thread.start()
-            
+            # Запуск потока для accept
+            threading.Thread(target=self._wait_for_call_connection, args=(call_id, server_socket), daemon=True).start()
             return server_socket
-            
         except Exception as e:
-            logger.error(f"❌ Ошибка создания входящего сокета: {e}")
+            logger.error(f"❌ [_create_incoming_call_socket] Звонок {call_id}: ошибка: {e}")
             return None
 
     def _wait_for_call_connection(self, call_id: str, server_socket: socket.socket):
