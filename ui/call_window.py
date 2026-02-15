@@ -35,7 +35,7 @@ class CallWindow(QWidget):
 
         self.is_active = False
         self.call_duration = 0
-        self.duration_timer = QTimer()
+        #self.duration_timer = QTimer()
         self.audio_initialized = False
         self.call_ended_emitted = False
         self.audio_stream = None
@@ -63,10 +63,6 @@ class CallWindow(QWidget):
         self.sent_packets = 0
         self.received_packets = 0
         self.last_audio_debug_time = 0
-        
-        # Запускаем проверку сокета для ВСЕХ звонков
-        QTimer.singleShot(1000, lambda: self.socket_check_timer.start(2000))
-    
 
         # Сокет для звонка - ИНИЦИАЛИЗИРУЕМ ПУСТЫМ
         self.call_socket = None
@@ -82,12 +78,11 @@ class CallWindow(QWidget):
         self.init_ui()
 
         # Инициализируем недостающие виджеты
-        self.title_label = None
-        #self.time_label = None
+        #self.title_label = None
+        
         
 
         # Инициализируем таймеры
-        self.call_timer = QTimer()
         self.socket_check_timer = QTimer()
         self.socket_check_timer.timeout.connect(self.auto_check_socket)
         self.diagnostic_timer = QTimer()
@@ -453,8 +448,8 @@ class CallWindow(QWidget):
 
         
         # Инициализировать call_timer
-        self.call_timer = QTimer()
-        self.call_timer.timeout.connect(self.update_call_time)
+        self.duration_timer = QTimer()
+        self.duration_timer.timeout.connect(self.update_duration)
             
         # Инициализировать диагностический таймер
         self.diagnostic_timer = QTimer()
@@ -480,12 +475,7 @@ class CallWindow(QWidget):
         main_layout.addWidget(self.end_button)
             
         # Настройка таймера для обновления длительности звонка
-        self.duration_timer.timeout.connect(self.update_duration)
-        
-        # Таймер для обновления времени звонка
-        self.socket_call_timer = QTimer()
-        self.socket_call_timer.timeout.connect(self.update_call_time)
-        self.socket_call_start_time = None  
+        self.duration_timer.timeout.connect(self.update_duration) 
 
         logger.info(f"🔊 UI CallWindow инициализирован: is_outgoing={self.is_outgoing}")
     
@@ -686,14 +676,10 @@ class CallWindow(QWidget):
                 self.call_socket = call_socket
                 self.socket_set = True
                 self.local_mode = False
-                # Устанавливаем сокет в любом случае
-                self.call_socket = call_socket
-                self.socket_set = True
-                    
                 # Если звонок уже активен, инициализируем аудио
                 if self.is_active and not self.audio_initialized:
                     logger.info("🔊 Инициализация аудио после установки сокета...")
-                    QTimer.singleShot(100, self.initialize_audio_streams)               
+                    QTimer.singleShot(100, self.initialize_audio_streams)  
                 return True
                          
         except Exception as e:
@@ -1525,14 +1511,6 @@ class CallWindow(QWidget):
                     logger.info(f"🔊 Fallback: комбинированное устройство {i}: {device['name']}")
                     break
 
-    def update_call_time(self):
-        "Обновление времени звонка"
-        if hasattr(self, 'call_start_time') and self.call_start_time:
-            elapsed = int(time.time() - self.call_start_time)
-            minutes = elapsed // 60
-            seconds = elapsed % 60
-            self.duration_label.setText(f"{minutes:02d}:{seconds:02d}")
-
     def start_call(self):
         """Начать звонок (после принятия)"""
         try:
@@ -2101,7 +2079,8 @@ class CallWindow(QWidget):
 
         except Exception as e:
             logger.error(f"Ошибка принятия звонка: {e}")
-            QMessageBox.critical(self, "Ошибка", f"Не удалось принять звонок: {e}")
+            traceback.print_exc()
+            QMessageBox.critical(self, "Ошибка", f"Не удалось принять звонок: {e}\n\n{traceback.format_exc()}")
 
     def reject_call(self):
         """Отклонить входящий звонок"""
@@ -2113,10 +2092,6 @@ class CallWindow(QWidget):
         """Завершить активный звонок"""
         logger.info(f"🔊 Завершение звонка {self.call_id}")
         
-        # Останавливаем таймер
-        if self.call_timer.isActive():
-            self.call_timer.stop()
-            
         # Сигнализируем о завершении
         self.call_ended.emit(self.call_id)
         
