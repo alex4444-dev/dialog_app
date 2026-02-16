@@ -325,7 +325,9 @@ class P2PNetworkClient(QObject):
         # Отправляем информацию о себе всем подключенным пирам
         for peer_id in list(self.connected_peers.keys()):
             self._send_self_info(peer_id)
+   
 
+    
     def _send_self_info(self, peer_id: str):
         """Отправка информации о себе пиру"""
         try:
@@ -851,6 +853,31 @@ class P2PNetworkClient(QObject):
                 logger.error(f"Ошибка обслуживания сети: {e}")
                 time.sleep(30)  # Большая пауза при ошибке
 
+    def send_media_info(self, call_id: str, peer_username: str):
+        """Отправить информацию о медиа-порте другому пиру"""
+        try:
+            # Ищем пира по имени
+            target_peer = None
+            for peer_id, peer_info in list(self.connected_peers.items()):
+                if peer_info.get('username') == peer_username:
+                    target_peer = peer_info
+                    break
+            if not target_peer:
+                logger.error(f"❌ Пир {peer_username} не найден для отправки media_info")
+                return False
+        
+            media_info = {
+                'type': 'media_info',
+                'call_id': call_id,
+                'media_port': 9100,  # фиксированный порт для звонков
+                'action': 'setup',
+                'timestamp': time.time()
+            }
+            return self._send_to_peer(target_peer, media_info)
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки media_info: {e}")
+            return False
+
     def _check_peer_connections(self):
         """Проверка активности подключенных пиров с улучшенной логикой"""
         current_time = time.time()
@@ -918,80 +945,6 @@ class P2PNetworkClient(QObject):
                 
         except Exception as e:
             logger.error(f"Ошибка обработки отключения пира {peer_id}: {e}")
-
-    def setup_video_connection(self, call_id: str, peer_username: str) -> socket.socket:
-        """Настройка видео соединения"""
-        try:
-            logger.info(f"📹 Настройка видео соединения для звонка {call_id}")
-            
-            # Ищем пира по имени пользователя
-            target_peer = None
-            for peer_id, peer_info in list(self.connected_peers.items()):
-                if peer_info.get('username') == peer_username:
-                    target_peer = peer_info
-                    break
-            
-            if not target_peer:
-                logger.error(f"❌ Пир {peer_username} не найден в подключенных")
-                return None
-            
-            peer_host, peer_port = target_peer['address']
-            
-            # Создаем серверный сокет для видео
-            video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Находим свободный порт для видео
-            video_port = self._find_free_video_port()
-            if not video_port:
-                logger.error("❌ Не удалось найти свободный порт для видео")
-                return None
-            
-            try:
-                video_socket.bind(('0.0.0.0', video_port))
-                video_socket.listen(1)
-                video_socket.settimeout(10.0)
-                
-                logger.info(f"📹 Видео сервер запущен на порту {video_port}")
-                
-                # Отправляем информацию о видео порте другому пиру
-                video_info = {
-                    'type': 'video_info',
-                    'call_id': call_id,
-                    'video_port': video_port,
-                    'action': 'setup',
-                    'timestamp': time.time()
-                }
-                
-                success = self._send_to_peer(target_peer, video_info)
-                
-                if success:
-                    logger.info(f"✅ Информация о видео порте {video_port} отправлена")
-                    
-                    # Сохраняем сокет
-                    self.media_sockets[f"{call_id}_video"] = video_socket
-                    
-                    # Запускаем поток для принятия подключения
-                    threading.Thread(
-                        target=self._accept_video_connection,
-                        args=(call_id, video_socket),
-                        daemon=True
-                    ).start()
-                    
-                    return video_socket
-                else:
-                    logger.error(f"❌ Не удалось отправить информацию о видео порте")
-                    video_socket.close()
-                    return None
-                    
-            except Exception as e:
-                logger.error(f"❌ Ошибка запуска видео сервера: {e}")
-                video_socket.close()
-                return None
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка настройки видео соединения: {e}")
-            return None
 
     def setup_video_connection(self, call_id: str, peer_username: str) -> socket.socket:
         """Настройка видео соединения"""
@@ -2115,7 +2068,7 @@ class P2PNetworkClient(QObject):
             server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 
             # Находим свободный порт для медиа
-            media_port = self._find_free_media_port()
+            media_port = self._find_free_call_port()
             if not media_port:
                 logger.error("❌ Не удалось найти свободный порт для медиа")
                 return False

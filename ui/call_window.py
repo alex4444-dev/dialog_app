@@ -35,7 +35,6 @@ class CallWindow(QWidget):
 
         self.is_active = False
         self.call_duration = 0
-        #self.duration_timer = QTimer()
         self.audio_initialized = False
         self.call_ended_emitted = False
         self.audio_stream = None
@@ -76,11 +75,6 @@ class CallWindow(QWidget):
         
         # Сначала инициализируем UI
         self.init_ui()
-
-        # Инициализируем недостающие виджеты
-        #self.title_label = None
-        
-        
 
         # Инициализируем таймеры
         self.socket_check_timer = QTimer()
@@ -1516,9 +1510,16 @@ class CallWindow(QWidget):
         try:
             logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
             
+            # Проверяем наличие кнопок
+            if not hasattr(self, 'start_button') or self.start_button is None:
+                logger.error("start_button отсутствует! Звонок не может быть запущен.")
+                QMessageBox.critical(self, "Ошибка", "Внутренняя ошибка интерфейса. Закройте окно и попробуйте снова.")
+                return
+
             # Меняем интерфейс
             self.start_button.hide()
-            self.cancel_button.hide()
+            if hasattr(self, 'cancel_button') and self.cancel_button:
+                self.cancel_button.hide()
             self.end_button.show()
             self.duration_label.setVisible(True)
             
