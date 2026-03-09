@@ -2,17 +2,18 @@ import sys
 import os
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QProgressBar, QMessageBox,
-                             QComboBox, QGroupBox, QScrollArea, QSizePolicy)
+                             QSizePolicy)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QPalette, QColor, QPainter
+from PyQt5.QtGui import QPalette, QColor, QPainter, QPixmap
+
 import logging
 import time
 import struct
 import threading
 import socket
 import numpy as np
-import traceback
 import json
+
 
 logger = logging.getLogger('dialog_gui')
 
@@ -21,6 +22,7 @@ class CallWindow(QWidget):
     call_accepted = pyqtSignal(str)
     call_rejected = pyqtSignal(str)
     call_started = pyqtSignal(str)
+    connection_established = pyqtSignal()
     
     def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None):
         super().__init__(parent)
@@ -37,9 +39,8 @@ class CallWindow(QWidget):
         self.call_duration = 0
         self.audio_initialized = False
         self.call_ended_emitted = False
-        self.audio_stream = None
-        self.audio_available = False
         self.accept_button_clicked = False
+        self.muted = False
         
         # Аудио параметры
         self.sample_rate = 44100
@@ -47,23 +48,22 @@ class CallWindow(QWidget):
         self.dtype = 'float32'
         self.blocksize = 1024
         
-        # Устройства
+        # Устройства(Будут задаваться глобально)
         self.input_device = None
         self.output_device = None
-        self.audio_system_type = "Unknown"
+        
         
         # Буфер для аудио данных
         self.audio_buffer = []
         self.buffer_size = 20
         self.audio_buffer_lock = threading.Lock()
-        self.stream_id = f"call_{call_id}"
-
+        
         # Счетчики для диагностики
         self.sent_packets = 0
         self.received_packets = 0
-        self.last_audio_debug_time = 0
+        
 
-        # Сокет для звонка - ИНИЦИАЛИЗИРУЕМ ПУСТЫМ
+        # Сокет для звонка
         self.call_socket = None
         self.socket_set = False
         self.socket_attempts = 0
@@ -72,6 +72,7 @@ class CallWindow(QWidget):
         # Флаги для отслеживания состояния
         self.audio_receiver_running = False
         self.local_mode = False
+        self._closing_by_network = False  # Для предотвращения двойной отправки сигнала
         
         # Сначала инициализируем UI
         self.init_ui()
@@ -79,18 +80,10 @@ class CallWindow(QWidget):
         # Инициализируем таймеры
         self.socket_check_timer = QTimer()
         self.socket_check_timer.timeout.connect(self.auto_check_socket)
-        self.diagnostic_timer = QTimer()
-        self.diagnostic_timer.timeout.connect(self.update_diagnostic_info)
-        
-        # Запускаем диагностический таймер
-        self.diagnostic_timer.start(1000)  # Обновлять каждую секунду
-    
+              
         # Запускаем проверку сокета (для исходящих звонков)
         if is_outgoing:
             QTimer.singleShot(1000, self.socket_check_timer.start)  # Запустить через секунду
-
-        # Затем определяем аудио систему
-        self.detect_audio_system()
 
         self.show()  
         self.raise_()  
@@ -103,42 +96,32 @@ class CallWindow(QWidget):
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         
         self.setWindowTitle(f"📞 Звонок с {self.username}")
-        self.setMinimumSize(550, 650)
-        self.setMaximumSize(800, 900)
-        self.resize(600, 700)
-        
-        
-        # убираем прозрачность
+        self.setFixedSize(640, 480)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAutoFillBackground(True)
         palette = self.palette()
         palette.setColor(QPalette.Window, QColor(255, 255, 255))
         self.setPalette(palette)
 
-        
-
-        # Устанавливаем стиль для полной непрозрачности
-        self.setStyleSheet("""
-            QGroupBox {
-                background-color: #f8f9fa;
-                border: 2px solid #dee2e6;
-                border-radius: 8px;
-                margin-top: 10px;
-                padding: 10px;
-                font-weight: bold;
-                font-size: 14px;
-            }
-            QGroupBox::title {
-                subcontrol-origin: margin;
-                left: 10px;
-                padding: 0 5px 0 5px;
-            }
-        """)
-
         # Главный layout
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
+        
+        # ---- Аватар (круглая картинка) ----
+        self.avatar_label = QLabel()
+        self.avatar_label.setFixedSize(120, 120)
+        self.avatar_label.setAlignment(Qt.AlignCenter)
+        self.avatar_label.setStyleSheet("""
+            border: 3px solid #3498db;
+            border-radius: 60px;
+            background-color: #ecf0f1;
+        """)
+        # Загружаем картинку-заглушку (можно заменить на иконку пользователя)
+        pixmap = QPixmap(100, 100)
+        pixmap.fill(QColor(52, 152, 219))
+        self.avatar_label.setPixmap(pixmap)
+        main_layout.addWidget(self.avatar_label, 0, Qt.AlignCenter)
         
         # Заголовок
         title_text = "Исходящий звонок" if self.is_outgoing else "Входящий звонок"
@@ -156,159 +139,14 @@ class CallWindow(QWidget):
         info_label.setWordWrap(True)
         main_layout.addWidget(info_label)
 
-
-        
-        # Группа выбора аудиоустройств
-        audio_group = QGroupBox("Настройки аудио")
-        audio_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        audio_group.setMinimumHeight(180)
-        audio_layout = QVBoxLayout()
-        audio_layout.setSpacing(8)
-        
-        # Информация о звуковой системе
-        self.audio_system_label = QLabel("Определение звуковой системы...")
-        self.audio_system_label.setAlignment(Qt.AlignCenter)
-        self.audio_system_label.setStyleSheet("font-size: 14px; color: #7f8c8d; font-style: italic; margin-bottom: 10px;")
-        self.audio_system_label.setWordWrap(True)
-        audio_layout.addWidget(self.audio_system_label)
-        
-        # Выбор устройства ввода
-        input_layout = QHBoxLayout()
-        input_label = QLabel("Микрофон:")
-        input_label.setFixedWidth(80)
-        input_layout.addWidget(input_label)
-        self.input_device_combo = QComboBox()
-        self.input_device_combo.setMaximumHeight(30)
-        input_layout.addWidget(self.input_device_combo)
-        audio_layout.addLayout(input_layout)
-        
-        # Выбор устройства вывода  
-        output_layout = QHBoxLayout()
-        output_label = QLabel("Динамики:")
-        output_label.setFixedWidth(80)
-        output_layout.addWidget(output_label)
-        self.output_device_combo = QComboBox()
-        self.output_device_combo.setMaximumHeight(30)
-        output_layout.addWidget(self.output_device_combo)
-        audio_layout.addLayout(output_layout)
-        
-        # Кнопка применения настроек
-        self.apply_audio_button = QPushButton("Применить аудиоустройства")
-        self.apply_audio_button.setFixedHeight(30)
-        self.apply_audio_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 6px;
-                border-radius: 4px;
-                font-size: 11px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
-        self.apply_audio_button.clicked.connect(self.apply_audio_devices)
-        audio_layout.addWidget(self.apply_audio_button)
-        
-        audio_group.setLayout(audio_layout)
-        main_layout.addWidget(audio_group)
-        
+     
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
         self.audio_status_label.setStyleSheet("font-size: 16px; color: #7f8c8d; margin: 5px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
-        
-        # Индикатор состояния сокета
-        self.socket_status_label = QLabel("🔴 Сокет: не установлен")
-        self.socket_status_label.setAlignment(Qt.AlignCenter)
-        self.socket_status_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 5px 5; font-weight: 500; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
-        self.socket_status_label.setWordWrap(True)
-        main_layout.addWidget(self.socket_status_label)
-        
-        # Диагностическая информация
-        self.diagnostic_label = QLabel("Ожидание установки соединения...")
-        self.diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 5px 0; font-weight: 500; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
-        self.diagnostic_label.setWordWrap(True)
-        main_layout.addWidget(self.diagnostic_label)
-        
-        # Детальная диагностика
-        self.detailed_diagnostic_label = QLabel("")
-        self.detailed_diagnostic_label.setAlignment(Qt.AlignCenter)
-        self.detailed_diagnostic_label.setStyleSheet("font-size: 12px; color: #7f8c8d; margin: 5px 0; font-style: italic; background-color: #f8f9fa; padding: 3px; border-radius: 4px;")
-        self.detailed_diagnostic_label.setWordWrap(True)
-        main_layout.addWidget(self.detailed_diagnostic_label)
-        
-        # Добавляем растягивающийся элемент, чтобы диагностика не накладывалась
-        main_layout.addStretch(1)
-        
-        # Группа тестирования
-        test_group = QGroupBox("Тестирование и диагностика")
-        test_group.setStyleSheet("QGroupBox { font-weight: bold; }")
-        test_layout = QHBoxLayout()
-        
-        # Кнопка тестирования аудио
-        self.test_audio_button = QPushButton("🔊 Тест аудио")
-        self.test_audio_button.setFixedHeight(35)
-        self.test_audio_button.setStyleSheet("""
-            QPushButton {
-                background-color: #3498db;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 5px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #2980b9;
-            }
-        """)
-        self.test_audio_button.clicked.connect(self.run_audio_diagnostic)
-        test_layout.addWidget(self.test_audio_button)
-        
-        # Кнопка тестирования гудков
-        self.test_tones_button = QPushButton("🔔 Тест гудков")
-        self.test_tones_button.setFixedHeight(35)
-        self.test_tones_button.setStyleSheet("""
-            QPushButton {
-                background-color: #9b59b6;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 5px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #8e44ad;
-            }
-        """)
-        self.test_tones_button.clicked.connect(self.test_call_tones)
-        test_layout.addWidget(self.test_tones_button)
-        
-        # Кнопка диагностики сокета
-        self.socket_diagnostic_button = QPushButton("🔍 Диагностика сокета")
-        self.socket_diagnostic_button.setFixedHeight(35)
-        self.socket_diagnostic_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e67e22;
-                color: white;
-                border: none;
-                padding: 8px;
-                border-radius: 5px;
-                font-size: 12px;
-            }
-            QPushButton:hover {
-                background-color: #d35400;
-            }
-        """)
-        self.socket_diagnostic_button.clicked.connect(self.debug_socket_state)
-        test_layout.addWidget(self.socket_diagnostic_button)
-        
-        test_group.setLayout(test_layout)
-        main_layout.addWidget(test_group)
+         
         
         # Таймер звонка
         self.duration_label = QLabel("00:00")
@@ -324,12 +162,6 @@ class CallWindow(QWidget):
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
         
-        # Прогресс-бар (для анимации)
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 0)  # Бесконечная анимация
-        self.progress_bar.setVisible(True)
-        self.progress_bar.setFixedHeight(10)
-        main_layout.addWidget(self.progress_bar)
         
         # Растягивающийся элемент для выравнивания
         main_layout.addStretch(1)
@@ -439,248 +271,174 @@ class CallWindow(QWidget):
         main_layout.addLayout(buttons_layout)
         
         self.setLayout(main_layout)
-
         
         # Инициализировать call_timer
         self.duration_timer = QTimer()
         self.duration_timer.timeout.connect(self.update_duration)
-            
-        # Инициализировать диагностический таймер
-        self.diagnostic_timer = QTimer()
-        self.diagnostic_timer.timeout.connect(self.update_diagnostic_info)
-        self.diagnostic_timer.start(1000)
 
-        # Кнопка завершения звонка (будет показана во время активного звонка)
+            
+        # ---- Активные кнопки (для активного звонка) ----
+        active_buttons_layout = QHBoxLayout()
+        self.mute_button = QPushButton("🔊 Микрофон вкл")
+        self.mute_button.clicked.connect(self.toggle_mute)
+        self.mute_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3498db;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover { background-color: #2980b9; }
+        """)
+        active_buttons_layout.addWidget(self.mute_button)
+
         self.end_button = QPushButton("📞 Завершить звонок")
         self.end_button.clicked.connect(self.end_call)
         self.end_button.setStyleSheet("""
             QPushButton {
                 background-color: #ff9800;
                 color: white;
-                font-size: 14px;
+                border: none;
                 padding: 10px;
                 border-radius: 5px;
+                font-weight: bold;
             }
-            QPushButton:hover {
-                background-color: #e68900;
-            }
+            QPushButton:hover { background-color: #e68900; }
         """)
-        self.end_button.hide()  # Скрываем до начала звонка
-        main_layout.addWidget(self.end_button)
-            
+        active_buttons_layout.addWidget(self.end_button)
+
+        self.active_buttons_widget = QWidget()
+        self.active_buttons_widget.setLayout(active_buttons_layout)
+        self.active_buttons_widget.hide()
+        main_layout.addWidget(self.active_buttons_widget)
+        
         # Настройка таймера для обновления длительности звонка
         self.duration_timer.timeout.connect(self.update_duration) 
-
-        logger.info(f"🔊 UI CallWindow инициализирован: is_outgoing={self.is_outgoing}")
+ 
     
-    def debug_socket_state(self):
-        """Расширенная диагностика состояния сокета"""
+        # Прогресс-бар (анимация ожидания)
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setFixedHeight(6)
+        main_layout.addWidget(self.progress_bar)
+
+    def toggle_mute(self):
+        """Включение/выключение микрофона"""
+        self.muted = not self.muted
+        if self.muted:
+            self.mute_button.setText("🔇 Микрофон выкл")
+            self.mute_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #e67e22;
+                    color: white;
+                    border: none;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #d35400; }
+            """)
+        else:
+            self.mute_button.setText("🔊 Микрофон вкл")
+            self.mute_button.setStyleSheet("""
+                QPushButton {
+                    background-color: #3498db;
+                    color: white;
+                    border: none;
+                    padding: 10px;
+                    border-radius: 5px;
+                    font-weight: bold;
+                }
+                QPushButton:hover { background-color: #2980b9; }
+            """)
+        logger.info(f"Микрофон {'отключен' if self.muted else 'включен'}")
+
+    def set_call_socket(self, call_socket):
+        """Установка сокета для звонка"""
         try:
-            logger.info("=" * 50)
-            logger.info("🔍 РАСШИРЕННАЯ ДИАГНОСТИКА СОКЕТА")
-            logger.info("=" * 50)
-            
-            # Базовая информация
-            logger.info(f"📞 ID звонка: {self.call_id}")
-            logger.info(f"📞 Тип звонка: {'исходящий' if self.is_outgoing else 'входящий'}")
-            logger.info(f"🔌 Сокет установлен: {self.socket_set}")
-            logger.info(f"🔌 CallSocket объект: {self.call_socket}")
-            logger.info(f"🔌 Попыток установки: {self.socket_attempts}")
-            logger.info(f"🔌 Локальный режим: {self.local_mode}")
-            
-            # Проверяем родительское окно
-            parent_info = "None"
-            if self.parent():
-                parent_info = f"{type(self.parent())} - {self.parent()}"
-            logger.info(f"👨‍👦 Родительское окно: {parent_info}")
-            
-            # Проверяем, есть ли метод для получения сокета у родителя
-            if self.parent() and hasattr(self.parent(), 'get_call_socket'):
-                logger.info("✅ У родителя есть метод get_call_socket")
-                try:
-                    parent_socket = self.parent().get_call_socket(self.call_id)
-                    logger.info(f"🔌 Сокет от родителя: {parent_socket}")
-                    if parent_socket and not self.call_socket:
-                        logger.info("🔄 Попытка установить сокет от родителя...")
-                        self.set_call_socket(parent_socket)
-                except Exception as e:
-                    logger.error(f"❌ Ошибка получения сокета от родителя: {e}")
-            else:
-                logger.warning("❌ У родителя нет метода get_call_socket")
-            
-            # Детальная информация о сокете
-            if self.call_socket:
-                try:
-                    logger.info(f"🔌 Тип сокета: {type(self.call_socket)}")
-                    logger.info(f"🔌 Файловый дескриптор: {self.call_socket.fileno()}")
-                    logger.info(f"🔌 Таймаут: {self.call_socket.gettimeout()}")
-                    
-                    # Проверяем состояние сокета
-                    original_timeout = self.call_socket.gettimeout()
-                    self.call_socket.settimeout(1.0)
-                    try:
-                        self.call_socket.send(b'')
-                        logger.info("✅ Сокет готов к отправке данных")
-                    except socket.error as e:
-                        logger.error(f"❌ Сокет не готов к отправке: {e}")
-                    finally:
-                        self.call_socket.settimeout(original_timeout)
-                    
-                    try:
-                        peer_addr = self.call_socket.getpeername()
-                        logger.info(f"🔌 Адрес подключения: {peer_addr}")
-                    except socket.error as e:
-                        logger.warning(f"⚠️ Не удалось получить адрес подключения: {e}")
-                        
-                except Exception as e:
-                    logger.error(f"❌ Ошибка проверки сокета: {e}")
-            else:
-                logger.warning("⚠️ Сокет не установлен в CallWindow!")
-                
-            # Собираем диагностическую информацию для пользователя
-            diagnostic_info = []
-            diagnostic_info.append(f"ID звонка: {self.call_id}")
-            diagnostic_info.append(f"Тип: {'исходящий' if self.is_outgoing else 'входящий'}")
-            diagnostic_info.append(f"Сокет установлен: {'ДА' if self.call_socket else 'НЕТ'}")
-            diagnostic_info.append(f"Попыток установки: {self.socket_attempts}")
-            diagnostic_info.append(f"Локальный режим: {'ДА' if self.local_mode else 'НЕТ'}")
-            
-            if self.call_socket:
-                diagnostic_info.append("✅ Сокет присутствует")
-                try:
-                    self.call_socket.send(b'')
-                    diagnostic_info.append("✅ Сокет готов к работе")
-                except:
-                    diagnostic_info.append("❌ Сокет не готов к работе")
-            else:
-                diagnostic_info.append("❌ Сокет отсутствует")
-                
-            message = "\n".join(diagnostic_info)
-            QMessageBox.information(self, "Расширенная диагностика сокета", message)
-            
-            logger.info("=" * 50)
-            logger.info("🔍 ДИАГНОСТИКА ЗАВЕРШЕНА")
-            logger.info("=" * 50)
-            
+            if call_socket is None:
+                return False
+            self.call_socket = call_socket
+            self.socket_set = True
+            self.local_mode = False
+            self.status_label.setText("🟢 Соединение установлено")
+            # Если звонок уже активен, инициализируем аудио
+            if self.is_active and not self.audio_initialized:
+                QTimer.singleShot(100, self.initialize_audio_streams)
+            return True                     
         except Exception as e:
-            logger.error(f"❌ Ошибка расширенной диагностики: {e}")
-            QMessageBox.critical(self, "Ошибка диагностики", f"Ошибка при диагностике: {e}")
+            logger.error(f"❌ Ошибка установки сокета: {e}")
+            return False
 
     def auto_check_socket(self):
         """Автоматическая проверка и попытка установки сокета"""
         if self.call_socket or self.socket_set or not self.isVisible() or self.local_mode:
             return
-        
+        # Получаем сокет от родителя (если есть метод)
+        if self.parent() and hasattr(self.parent(), 'get_call_socket'):
+            parent_socket = self.parent().get_call_socket(self.call_id)
+            if parent_socket:
+                self.set_call_socket(parent_socket)
+                self.socket_check_timer.stop()
+                return
+        self.socket_attempts += 1
         if self.socket_attempts >= self.max_socket_attempts:
-            logger.warning(f"⚠️ Достигнут максимум попыток установки сокета ({self.max_socket_attempts})")
             self.socket_check_timer.stop()
             self.local_mode = True
-            self.socket_status_label.setText("🔇 Локальный режим (сокет недоступен)")
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-            
-            # Если это исходящий звонок, все равно пытаемся запустить аудио в локальном режиме
-            if self.is_outgoing and not self.audio_initialized:
-                QTimer.singleShot(500, self.initialize_local_audio)
-            return
-        
-        logger.info(f"🔄 Автопроверка сокета (попытка {self.socket_attempts + 1}/{self.max_socket_attempts})")
-        self.socket_attempts += 1
-    
-        # Получаем сокет от родителя
-        parent_socket = self.get_call_socket_from_parent()
-        
-        if parent_socket:
-            logger.info(f"✅ Получен сокет от родителя, тип: {type(parent_socket)}")
-            
-            # Проверяем тип сокета
-            if hasattr(parent_socket, 'send'):
-                # Это клиентский сокет
-                success = self.set_call_socket(parent_socket)
-                if success:
-                    logger.info("✅ Сокет успешно установлен через автопроверку")
-                    self.socket_check_timer.stop()
-                    return
-                else:
-                    logger.warning("⚠️ Не удалось установить сокет от родителя")
-            elif hasattr(parent_socket, 'listen'):
-                # Это серверный сокет (для входящих звонков)
-                logger.info("🔧 Получен серверный сокет, ожидаем подключения...")
-                success = self.set_call_socket(parent_socket)
-                if success:
-                    self.socket_check_timer.stop()
-                    return
-            else:
-                logger.warning(f"⚠️ Неизвестный тип сокета: {type(parent_socket)}")
-        else:
-            logger.warning("⚠️ Не удалось получить сокет от родителя")
-        
-        # Если это исходящий звонок и сокет все еще не установлен
-        if self.is_outgoing and self.socket_attempts >= 2:
-            logger.warning("⚠️ Сокет не установлен для исходящего звонка")
-            self.diagnostic_label.setText("⚠️ Ожидание установки соединения...")
-            self.diagnostic_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-            
-            # Если попытки исчерпаны, переходим в локальный режим
-            if self.socket_attempts >= self.max_socket_attempts:
-                self.local_mode = True
-                if not self.audio_initialized:
-                    QTimer.singleShot(500, self.initialize_local_audio)
-
-    def set_call_socket(self, call_socket):
-        """Установка сокета для звонка"""
+            self.status_label.setText("⚠️ Локальный режим (без сети)")        
+           
+    def accept_call(self):
+        """Принять входящий звонок"""
         try:
-            logger.info(f"🔧 CallWindow.set_call_socket: Установка сокета для звонка {self.call_id}")
+            self.accept_button.hide()
+            self.reject_button.hide()
+            self.active_buttons_widget.show()
+            self.duration_label.setVisible(True)
+            self.progress_bar.hide()
             
-            if call_socket is None:
-                logger.warning(f"⚠️ Попытка установить ПУСТОЙ сокет для звонка {self.call_id}")
-                self.socket_status_label.setText("🟡 Сокет: ожидание установки...")
-                self.socket_status_label.setStyleSheet("font-size: 12px; color: #f39c12;")
-                return False
-                
-            # Проверяем тип сокета 
-            logger.info(f"🔧 Тип сокета: {type(call_socket)}")
-            
-            # Проверяем основные атрибуты сокета
-            if not hasattr(call_socket, 'send'):
-                logger.error(f"❌ Объект не является сокетом: {call_socket}")
-                self.socket_status_label.setText("🔴 Сокет: неверный тип")
-                return False
 
-            # Определяем тип сокета (серверный или клиентский)
-            is_server_socket = hasattr(call_socket, 'listen')
-                
-            if is_server_socket:
-                logger.info("🔧 Получен серверный сокет (ожидание подключения)")
-                self.call_socket = call_socket    
-                self.socket_set = True
-                self.local_mode = False
+            # Проверяем наличие сокета
+            if not self.call_socket:
+                self.local_mode = True
+                self.status_label.setText("🔇 Локальный режим")
 
-                # Запускаем поток для ожидания подключения
-                threading.Thread(
-                    target=self._wait_for_incoming_connection,
-                    args=(call_socket,),
-                    daemon=True
-                ).start()
-                        
-                self.socket_status_label.setText("🟡 Сокет: ожидание подключения...")
-                self.socket_status_label.setStyleSheet("font-size: 12px; color: #f39c12;")
-                return True
+            if self.local_mode:
+                success = self.initialize_local_audio()
             else:
-                logger.info("🔧 Получен клиентский сокет")
-                self.call_socket = call_socket
-                self.socket_set = True
-                self.local_mode = False
-                # Если звонок уже активен, инициализируем аудио
-                if self.is_active and not self.audio_initialized:
-                    logger.info("🔊 Инициализация аудио после установки сокета...")
-                    QTimer.singleShot(100, self.initialize_audio_streams)  
-                return True
-                         
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка установки сокета: {e}")
-            self.socket_status_label.setText(f"🔴 Сокет: критическая ошибка")
-            return False
+                success = self.initialize_audio_streams()
 
+            if success:
+                self.call_start_time = time.time()
+                self.duration_timer.start(1000)
+                self.is_active = True
+                self.status_label.setText("✅ Звонок активен")
+                self.call_accepted.emit(self.call_id)
+                logger.info(f"Звонок {self.call_id} принят")
+            else:
+                self.status_label.setText("❌ Ошибка аудио")
+        except Exception as e:
+            logger.error(f"Ошибка принятия звонка: {e}")
+            
+    def reject_call(self):
+        """Отклонить входящий звонок"""
+        logger.info(f"🔊 Отклонение звонка {self.call_id}")
+        self.call_rejected.emit(self.call_id)
+        self.close()
+    
+    def end_call(self):
+        """Завершить активный звонок"""
+        self.call_ended.emit(self.call_id)
+        self.close()
+    
+    def cancel_call(self):
+        """Отменить исходящий звонок"""
+        logger.info(f"🔊 Отмена звонка {self.call_id}")
+        self.call_ended.emit(self.call_id)
+        self.close()
+     
     def set_incoming_socket(self, call_socket):
         """Установка сокета для входящего звонка"""
         try:
@@ -711,19 +469,18 @@ class CallWindow(QWidget):
                 self.local_mode = True
                 
             # Обновляем статус
-            self.socket_status_label.setText("🟢 Сокет: установлен")
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+            self.status_label.setText("🟢 Сокет: установлен")
+            self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
             
             # Если звонок уже принят, инициализируем аудио
             if self.is_active and not self.audio_initialized:
                 logger.info("🔊 Инициализация аудио после установки сокета...")
-                QTimer.singleShot(100, self.initialize_audio_streams)
-                
+                QTimer.singleShot(100, self.initialize_audio_streams)   
             return True
         
         except Exception as e:
             logger.error(f"❌ Ошибка установки сокета для входящего звонка: {e}")
-            self.socket_status_label.setText("🔴 Сокет: ошибка установки")
+            self.status_label.setText("🔴 Сокет: ошибка установки")
             return False
 
     def _wait_for_incoming_connection(self, server_socket):
@@ -754,14 +511,18 @@ class CallWindow(QWidget):
             # Обновляем сокет
             self.call_socket = client_socket
             self.local_mode = False
+            self.socket_set = True  # уже установлен, но для порядка
             
             # Обновляем UI в главном потоке
-            self.socket_status_label.setText("🟢 Сокет: подключен")
-            self.socket_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+            self.status_label.setText("🟢 Сокет: подключен")
+            self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
             
             # Закрываем серверный сокет
             server_socket.close()
         
+            # Сигнализируем, что соединение установлено (для входящего звонка)
+            self.connection_established.emit()
+            
             # Если звонок активен, инициализируем аудио
             if self.is_active and not self.audio_initialized:
                 logger.info("🔊 Инициализация аудио после подключения...")
@@ -769,10 +530,10 @@ class CallWindow(QWidget):
             
         except socket.timeout:
             logger.error(f"❌ Таймаут ожидания подключения для звонка {self.call_id}")
-            self.socket_status_label.setText("🔴 Сокет: таймаут подключения")
+            self.status_label.setText("🔴 Сокет: таймаут подключения")
         except Exception as e:
             logger.error(f"❌ Ошибка ожидания подключения: {e}")
-            self.socket_status_label.setText("🔴 Сокет: ошибка подключения")
+            self.status_label.setText("🔴 Сокет: ошибка подключения")
 
     def get_call_socket_from_parent(self):
         """Получение сокета от родительского окна"""
@@ -819,464 +580,7 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.debug(f"Ошибка проверки сокета: {e}")
             return False
-    
-    def populate_audio_devices(self):
-        """Заполнение списков аудиоустройств"""
-        try:
-            import sounddevice as sd
-            
-            devices = sd.query_devices()
-            
-            self.input_device_combo.clear()
-            self.output_device_combo.clear()
-            
-            # Добавляем опцию "Автовыбор"
-            self.input_device_combo.addItem("Автовыбор", -1)
-            self.output_device_combo.addItem("Автовыбор", -1)
-            
-            for i, device in enumerate(devices):
-                device_name = f"{i}: {device['name']}"
-                # Обрезаем длинные названия
-                if len(device_name) > 60:
-                    device_name = device_name[:57] + "..."
-                    
-                if device['max_input_channels'] > 0:
-                    self.input_device_combo.addItem(device_name, i)
-                    
-                if device['max_output_channels'] > 0:
-                    self.output_device_combo.addItem(device_name, i)
-            
-            # Устанавливаем текущие выбранные устройства или автовыбор
-            if self.input_device is not None:
-                index = self.input_device_combo.findData(self.input_device)
-                if index >= 0:
-                    self.input_device_combo.setCurrentIndex(index)
-                else:
-                    self.input_device_combo.setCurrentIndex(0)
-            else:
-                self.input_device_combo.setCurrentIndex(0)
-                
-            if self.output_device is not None:
-                index = self.output_device_combo.findData(self.output_device)
-                if index >= 0:
-                    self.output_device_combo.setCurrentIndex(index)
-                else:
-                    self.output_device_combo.setCurrentIndex(0)
-            else:
-                self.output_device_combo.setCurrentIndex(0)
-                
-        except Exception as e:
-            logger.error(f"Ошибка заполнения списка устройств: {e}")
-            self.show_audio_error(f"Ошибка списка устройств: {e}")
-
-    def apply_audio_devices(self):
-        """Применение выбранных аудиоустройств"""
-        try:
-            input_index = self.input_device_combo.currentData()
-            output_index = self.output_device_combo.currentData()
-            
-            # Если выбран автовыбор, устанавливаем None
-            self.input_device = input_index if input_index != -1 else None
-            self.output_device = output_index if output_index != -1 else None
-            
-            logger.info(f"🔊 Применены устройства: ввод={self.input_device}, вывод={self.output_device}")
-            
-            # Переинициализируем аудиопотоки если звонок активен
-            if self.is_active and self.audio_initialized:
-                self.stop_audio_streams()
-                success = self.initialize_audio_streams()
-                if success:
-                    QMessageBox.information(self, "Успех", 
-                                          "Аудиоустройства применены. Звонок продолжен с новыми устройствами.")
-                else:
-                    QMessageBox.warning(self, "Ошибка", 
-                                      "Не удалось инициализировать аудио с выбранными устройствами.")
-            else:
-                # Просто тестируем гудки на новых устройствах
-                self.test_call_tones()
-                
-            # Обновляем диагностику
-            self.update_audio_status_display()
-                              
-        except Exception as e:
-            logger.error(f"Ошибка применения аудиоустройств: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Не удалось применить устройства: {e}")
-
-    def update_audio_status_display(self):
-        """Обновление отображения статуса аудио"""
-        if self.input_device is not None and self.output_device is not None:
-            try:
-                import sounddevice as sd
-                devices = sd.query_devices()
-                input_name = devices[self.input_device]['name'] if self.input_device < len(devices) else "Unknown"
-                output_name = devices[self.output_device]['name'] if self.output_device < len(devices) else "Unknown"
-                
-                # Обрезаем длинные названия
-                if len(input_name) > 30:
-                    input_name = input_name[:27] + "..."
-                if len(output_name) > 30:
-                    output_name = output_name[:27] + "..."
-                    
-                self.audio_status_label.setText(f"🔊 Ввод: {input_name}\n🔊 Вывод: {output_name}")
-                self.audio_status_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 12px 0; font-weight: 500; background-color: #e8f4fc; padding: 10px; border-radius: 6px;")
-            except:
-                self.audio_status_label.setText(f"🔊 Аудио: ввод {self.input_device}, вывод {self.output_device}")
-                self.audio_status_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 12px 0; font-weight: 500; background-color: #e8f4fc; padding: 10px; border-radius: 6px;")
-        else:
-            self.audio_status_label.setText("🔊 Аудио: автовыбор устройств")
-            self.audio_status_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 12px 0; font-weight: 500; background-color: #fef9e7; padding: 10px; border-radius: 6px;")
-
-    def test_call_tones(self):
-        """Тестирование гудков звонка на текущих устройствах"""
-        try:
-            import sounddevice as sd
-            import numpy as np
-            
-            logger.info("🔊 ТЕСТИРОВАНИЕ ГУДКОВ ЗВОНКА...")
-            
-            # Определяем устройство для теста
-            test_device = self.output_device
-            if test_device is None:
-                # Если устройство не выбрано, используем автовыбор
-                try:
-                    default_output = sd.default.device[1] if sd.default.device else 0
-                    test_device = default_output
-                except:
-                    test_device = 0
-            
-            # Создаем тон гудка (440 Гц)
-            duration = 1.0
-            sample_rate = 44100
-            frequency = 440
-            
-            t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-            tone = 0.3 * np.sin(2 * np.pi * frequency * t)
-            
-            # Тестируем на выбранном устройстве вывода
-            logger.info(f"🔊 Воспроизведение гудка на устройстве {test_device}")
-            sd.play(tone, sample_rate, device=test_device)
-            sd.wait()
-            
-            logger.info("✅ Гудок воспроизведен")
-            QMessageBox.information(self, "Тест гудков", 
-                                  f"Гудок воспроизведен на устройстве {test_device}. Проверьте, слышен ли звук.")
-            return True
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка тестирования гудков: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Не удалось воспроизвести гудок: {e}")
-            return False
-
-    def update_diagnostic_info(self):
-        """Обновление диагностической информации"""
-        current_time = time.time()
-        
-        # Обновляем статус сокета
-        socket_ok = self.check_socket_connection()
-        socket_status = "🟢" if socket_ok else "🔴"
-        socket_text = "установлен" if socket_ok else "не установлен"
-        
-        if self.local_mode:
-            socket_status = "🟡"
-            socket_text = "локальный режим"
-    
-        self.socket_status_label.setText(f"{socket_status} Сокет: {socket_text}")
-        
-        # Добавляем информацию о типе звонка
-        call_type_info = f"{'📤 Исходящий' if self.is_outgoing else '📥 Входящий'}"
-        socket_info = f"{socket_status} Сокет: {socket_text}"
-
-        if socket_ok and not self.local_mode:
-            self.socket_status_label.setStyleSheet("font-size: 16px; color: #27ae60; font-weight: 500;")
-        elif self.local_mode:
-            self.socket_status_label.setStyleSheet("font-size: 16px; color: #e67e22; font-weight: 500;")
-            socket_info += " ⚠️"
-        else:
-            self.socket_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; font-weight: 500;")
-            socket_info += " ❌"
-
-        # Показываем рекомендации если сокет не установлен
-        if not self.call_socket and not self.local_mode:
-            recommendations = []
-            if self.parent() and hasattr(self.parent(), 'get_call_socket'):
-                recommendations.append("1. Нажмите 'Диагностика сокета'")
-                recommendations.append("2. Проверьте соединение")
-            else:
-                recommendations.append("Родительское окно не предоставляет сокет")
-
-            if recommendations:
-                self.detailed_diagnostic_label.setText("\n".join(recommendations))
-
-     
-        if self.is_active:
-            audio_status = "🔊" if self.audio_initialized else "🔇"
-            
-            # Форматируем информацию более читаемо
-            info = f"{audio_status} Аудио активен | {socket_status} Соединение | 📤 {self.sent_packets} | 📥 {self.received_packets}"
-            self.diagnostic_label.setText(info)
-            self.diagnostic_label.setStyleSheet("font-size: 14px; color: #2c3e50; margin: 8px 0; font-weight: 500; background-color: #e8f4fc; padding: 8px; border-radius: 6px;")
-            
-            # Обновляем статус аудио
-            if self.audio_initialized:
-                self.audio_status_label.setText("🔊 Аудио активно")
-                self.audio_status_label.setStyleSheet("font-size: 16px; color: #27ae60; margin: 12px 0; font-weight: 500;")
-            else:
-                self.audio_status_label.setText("🔇 Аудио отключено")
-                self.audio_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; margin: 12px 0; font-weight: 500;")
-            
-            # Детальная диагностика каждые 5 секунд
-            if current_time - self.last_audio_debug_time > 5:
-                self.last_audio_debug_time = current_time
-                self.debug_audio_streams()
-        else:
-            # Показываем информацию о состоянии когда звонок не активен
-            if self.audio_available:
-                if self.audio_initialized:
-                    self.diagnostic_label.setText("✅ Аудио система готова к работе")
-                    self.diagnostic_label.setStyleSheet("font-size: 14px; color: #27ae60; margin: 8px 0; font-weight: 500; background-color: #e8f4fc; padding: 8px; border-radius: 6px;")
-                    self.audio_status_label.setText("🔊 Аудио готово")
-                    self.audio_status_label.setStyleSheet("font-size: 16px; color: #27ae60; margin: 12px 0; font-weight: 500;")
-                else:
-                    if not socket_ok:
-                        self.diagnostic_label.setText("⚠️ Ожидание установки соединения...")
-                        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 8px 0; font-weight: 500; background-color: #fef9e7; padding: 8px; border-radius: 6px;")
-                    else:
-                        self.diagnostic_label.setText("⚠️ Аудио система обнаружена, но не инициализирована")
-                        self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e67e22; margin: 8px 0; font-weight: 500; background-color: #fef9e7; padding: 8px; border-radius: 6px;")
-                    self.audio_status_label.setText("🔇 Аудио: ожидание")
-                    self.audio_status_label.setStyleSheet("font-size: 16px; color: #e67e22; margin: 12px 0; font-weight: 500;")
-            else:
-                self.diagnostic_label.setText("❌ Аудио система недоступна")
-                self.diagnostic_label.setStyleSheet("font-size: 14px; color: #e74c3c; margin: 8px 0; font-weight: 500; background-color: #fdedec; padding: 8px; border-radius: 6px;")
-                self.audio_status_label.setText("🔇 Аудио недоступно")
-                self.audio_status_label.setStyleSheet("font-size: 16px; color: #e74c3c; margin: 12px 0; font-weight: 500;")
-
-    def debug_audio_streams(self):
-        """Детальная диагностика аудио потоков"""
-        try:
-            if not self.audio_initialized:
-                self.detailed_diagnostic_label.setText("Аудио потоки не инициализированы")
-                return
-            
-            import sounddevice as sd
-            
-            # Проверяем состояние потоков
-            input_active = hasattr(self, 'input_stream') and self.input_stream and self.input_stream.active
-            output_active = hasattr(self, 'output_stream') and self.output_stream and self.output_stream.active
-            
-            socket_ok = self.check_socket_connection()
-            socket_status = "🟢" if socket_ok else "🔴"
-            
-            if self.local_mode:
-                socket_status = "🟡"
-            
-            debug_info = f"Вход: {'🟢' if input_active else '🔴'} | Выход: {'🟢' if output_active else '🔴'} | Сокет: {socket_status}"
-            
-            # Проверяем уровень сигнала в буфере
-            buffer_level = len(self.audio_buffer)
-            buffer_status = "🟢" if buffer_level > 0 else "🔴"
-            
-            debug_info += f" | Буфер: {buffer_status} ({buffer_level})"
-            
-            self.detailed_diagnostic_label.setText(debug_info)
-            logger.info(f"🔍 Детальная диагностика: {debug_info}")
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка детальной диагностики: {e}")
-
-    def run_audio_diagnostic(self):
-        """Запуск полной диагностики аудио системы"""
-        try:
-            logger.info("🔊 ЗАПУСК ПОЛНОЙ ДИАГНОСТИКИ АУДИО...")
-            
-            # Тест 1: Проверка доступности sounddevice
-            try:
-                import sounddevice as sd
-                logger.info("✅ SoundDevice импортирован успешно")
-            except ImportError as e:
-                logger.error(f"❌ SoundDevice не установлен: {e}")
-                self.show_audio_error("SoundDevice не установлен")
-                return
-            
-            # Тест 2: Проверка устройств
-            devices = sd.query_devices()
-            logger.info(f"🔊 Найдено устройств: {len(devices)}")
-            
-            if len(devices) == 0:
-                logger.error("❌ Аудио устройства не найдены")
-                self.show_audio_error("Аудио устройства не найдены")
-                return
-            
-            # Тест 3: Проверка устройств по умолчанию
-            default_input = sd.default.device[0] if sd.default.device else None
-            default_output = sd.default.device[1] if sd.default.device else None
-            logger.info(f"🔊 Устройство ввода по умолчанию: {default_input}")
-            logger.info(f"🔊 Устройство вывода по умолчанию: {default_output}")
-            
-            # Тест 4: Проверка воспроизведения
-            playback_result = self.test_audio_playback()
-            
-            # Тест 5: Проверка записи
-            record_result = self.test_audio_recording()
-            
-            # Тест 6: Проверка петли (запись -> воспроизведение)
-            loopback_result = self.test_audio_loopback()
-            
-            # Обновление интерфейса на основе результатов
-            if playback_result and record_result and loopback_result:
-                self.audio_status_label.setText("🔊 Аудио: полная диагностика пройдена")
-                self.audio_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
-                self.diagnostic_label.setText("✅ Аудио система работает корректно")
-                self.diagnostic_label.setStyleSheet("font-size: 10px; color: #27ae60;")
-            elif playback_result:
-                self.audio_status_label.setText("🔊 Аудио: воспроизведение работает")
-                self.audio_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-                self.diagnostic_label.setText("⚠️ Воспроизведение работает, запись/петля нет")
-                self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e67e22;")
-            else:
-                self.audio_status_label.setText("🔇 Аудио: проблемы с системой")
-                self.audio_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
-                self.diagnostic_label.setText("❌ Проблемы с аудио системой")
-                self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка диагностики: {e}")
-            self.show_audio_error(f"Ошибка диагностики: {e}")
-
-    def test_audio_loopback(self):
-        """Тестирование петли записи-воспроизведения"""
-        try:
-            import sounddevice as sd
-            import numpy as np
-            
-            logger.info("🔊 ТЕСТИРОВАНИЕ ПЕТЛИ ЗАПИСЬ-ВОСПРОИЗВЕДЕНИЕ...")
-            
-            # Определяем устройство для теста
-            test_device = self.input_device if self.input_device is not None else self.output_device
-            if test_device is None:
-                try:
-                    default_device = sd.default.device[0] if sd.default.device else 0
-                    test_device = default_device
-                except:
-                    test_device = 0
-            
-            try:
-                duration = 3.0
-                sample_rate = 44100
-                
-                logger.info(f"🎤 Запись тестового сигнала на устройстве {test_device}...")
-                
-                # Записываем аудио с микрофона
-                recording = sd.rec(int(duration * sample_rate), 
-                                 samplerate=sample_rate, 
-                                 channels=1,
-                                 device=test_device)
-                sd.wait()
-                
-                logger.info(f"✅ Записано {len(recording)} сэмплов")
-                
-                # Воспроизводим записанное аудио
-                logger.info(f"🔊 Воспроизведение записанного сигнала на устройстве {test_device}...")
-                sd.play(recording, sample_rate, device=test_device)
-                sd.wait()
-                
-                logger.info("✅ Петля запись-воспроизведение работает")
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ Петля не работает: {e}")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка тестирования петли: {e}")
-            return False
-
-    def test_audio_playback(self):
-        """Тестирование воспроизведения на выбранном устройстве"""
-        try:
-            import sounddevice as sd
-            import numpy as np
-            
-            logger.info("🔊 ТЕСТИРОВАНИЕ ВОСПРОИЗВЕДЕНИЯ...")
-            
-            # Определяем устройство для теста
-            test_device = self.output_device
-            if test_device is None:
-                try:
-                    default_output = sd.default.device[1] if sd.default.device else 0
-                    test_device = default_output
-                except:
-                    test_device = 0
-            
-            try:
-                # Создаем простой тестовый тон
-                duration = 2.0
-                frequency = 440
-                sample_rate = 44100
-                
-                t = np.linspace(0, duration, int(sample_rate * duration), endpoint=False)
-                tone = 0.3 * np.sin(2 * np.pi * frequency * t)
-                
-                # Пробуем воспроизвести на выбранном устройстве
-                sd.play(tone, sample_rate, device=test_device)
-                sd.wait()
-                
-                logger.info(f"✅ Устройство {test_device} работает: Воспроизведение OK")
-                return True
-                
-            except Exception as e:
-                logger.error(f"❌ Устройство {test_device} не работает: {e}")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка тестирования воспроизведения: {e}")
-            return False
-
-    def test_audio_recording(self):
-        """Тестирование записи на выбранном устройстве"""
-        try:
-            import sounddevice as sd
-            import numpy as np
-            
-            logger.info("🔊 ТЕСТИРОВАНИЕ ЗАПИСИ...")
-            
-            # Определяем устройство для теста
-            test_device = self.input_device
-            if test_device is None:
-                try:
-                    default_input = sd.default.device[0] if sd.default.device else 0
-                    test_device = default_input
-                except:
-                    test_device = 0
-            
-            try:
-                # Пробуем записать короткий фрагмент
-                duration = 2.0
-                sample_rate = 44100
-                
-                recording = sd.rec(int(duration * sample_rate), 
-                                 samplerate=sample_rate, 
-                                 channels=1,
-                                 device=test_device)
-                sd.wait()
-                
-                # Проверяем, что записаны не только нули
-                max_amplitude = np.max(np.abs(recording))
-                logger.info(f"✅ Запись с устройства {test_device} работает: {len(recording)} сэмплов, макс. амплитуда: {max_amplitude:.4f}")
-                
-                if max_amplitude < 0.001:
-                    logger.warning("⚠️ Записаны только тихие сигналы или тишина")
-                
-                return True
-                
-            except Exception as e:
-                logger.warning(f"❌ Запись с устройства {test_device} не работает: {e}")
-                return False
-            
-        except Exception as e:
-            logger.error(f"❌ Ошибка тестирования записи: {e}")
-            return False
-
+       
     def safe_accept_call(self):
         """Безопасное принятие звонка с защитой от многократного нажатия"""
         if self.accept_button_clicked:
@@ -1294,221 +598,12 @@ class CallWindow(QWidget):
             
         self.accept_button_clicked = True
         self.reject_call()
-        
-    def detect_audio_system(self):
-        """Определение звуковой системы"""
-        try:
-            import sounddevice as sd
-            
-            logger.info("🔊 ДИАГНОСТИКА АУДИО СИСТЕМЫ...")
-            
-            # Получаем информацию об устройствав
-            devices = sd.query_devices()
-            default_input = sd.default.device[0] if sd.default.device else None
-            default_output = sd.default.device[1] if sd.default.device else None
-            
-            logger.info(f"🔊 Найдено аудио устройств: {len(devices)}")
-            logger.info(f"🔊 Устройство ввода по умолчанию: {default_input}")
-            logger.info(f"🔊 Устройство вывода по умолчанию: {default_output}")
-            
-            # Определяем тип аудиосистемы
-            self.audio_system_type = "Unknown"
-            if any('pipewire' in device['name'].lower() for device in devices):
-                self.audio_system_type = "PipeWire"
-            elif any('pulse' in device['name'].lower() for device in devices):
-                self.audio_system_type = "PulseAudio"
-            elif any('alsa' in device['name'].lower() for device in devices):
-                self.audio_system_type = "ALSA"
-            
-            logger.info(f"🔊 Определена аудиосистема: {self.audio_system_type}")
-            
-            # Автоматический выбор устройств на основе системы
-            self.auto_select_audio_devices(self.audio_system_type)
-            
-            # Заполняем списки устройств в UI
-            self.populate_audio_devices()
-            
-            # Проверяем доступность аудио устройств
-            if len(devices) > 0:
-                self.audio_available = True
-                
-                # Быстрый тест воспроизведения
-                test_result = self.test_audio_playback()
-                
-                audio_system_info = f"✅ {self.audio_system_type} система ({len(devices)} устройств)"
-                
-                if test_result:
-                    self.audio_status_label.setText("🔊 Аудио: система готова")
-                    self.audio_status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
-                    self.diagnostic_label.setText("✅ Аудио система работает")
-                    self.diagnostic_label.setStyleSheet("font-size: 10px; color: #27ae60;")
-                else:
-                    self.audio_status_label.setText("🔇 Аудио: есть проблемы")
-                    self.audio_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-                    self.diagnostic_label.setText("⚠️ Нажмите 'Тест аудио' для диагностики")
-                    self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e67e22;")
-                    
-            else:
-                self.audio_available = False
-                audio_system_info = "❌ Аудио устройства не найдены"
-                self.audio_status_label.setText("🔇 Аудио: устройства не найдены")
-                self.audio_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
-                self.diagnostic_label.setText("❌ Аудио устройства не найдены")
-                self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-                
-            self.audio_system_label.setText(audio_system_info)
-            logger.info(f"🔊 Результат диагностики: {audio_system_info}")
-            
-        except ImportError:
-            self.audio_available = False
-            self.audio_system_label.setText("❌ SoundDevice не установлен")
-            self.audio_status_label.setText("🔇 Аудио: библиотека не установлена")
-            self.audio_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
-            self.diagnostic_label.setText("❌ Установите sounddevice: pip install sounddevice")
-            self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-            logger.warning("SoundDevice не установлен")
-        except Exception as e:
-            self.audio_available = False
-            self.audio_system_label.setText(f"❌ Ошибка аудио: {str(e)}")
-            self.audio_status_label.setText("🔇 Аудио: ошибка инициализации")
-            self.audio_status_label.setStyleSheet("font-size: 12px; color: #e74c3c;")
-            self.diagnostic_label.setText(f"❌ Ошибка: {str(e)}")
-            self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-            logger.error(f"Ошибка инициализации аудио: {e}")
-
-    def auto_select_audio_devices(self, audio_system_type):
-        """Автоматический выбор аудиоустройств в зависимости от системы"""
-        try:
-            import sounddevice as sd
-            
-            devices = sd.query_devices()
-            
-            if audio_system_type == "PipeWire":
-                self.find_pipewire_devices(devices)
-            elif audio_system_type == "PulseAudio":
-                self.find_pulseaudio_devices(devices)
-            else:
-                self.find_fallback_devices(devices)
-                
-        except Exception as e:
-            logger.error(f"Ошибка автоматического выбора устройств: {e}")
-            self.input_device = None
-            self.output_device = None
-
-    def find_pipewire_devices(self, devices):
-        """Поиск устройств для PipeWire"""
-        logger.info("🔊 Поиск устройств для PipeWire...")
-        input_found = False
-        output_found = False
-        
-        for i, device in enumerate(devices):
-            name_lower = device['name'].lower()
-            
-            if ('analog' in name_lower or 'default' in name_lower or 
-                'built-in' in name_lower or 'hdmi' not in name_lower):
-                
-                if device['max_input_channels'] > 0 and not input_found:
-                    self.input_device = i
-                    input_found = True
-                    logger.info(f"🔊 PipeWire: выбрано устройство ввода {i}: {device['name']}")
-                
-                if device['max_output_channels'] > 0 and not output_found:
-                    self.output_device = i
-                    output_found = True
-                    logger.info(f"🔊 PipeWire: выбрано устройство вывода {i}: {device['name']}")
-                
-                if input_found and output_found:
-                    break
-        
-        if not input_found:
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0:
-                    self.input_device = i
-                    logger.info(f"🔊 PipeWire: резервное устройство ввода {i}: {device['name']}")
-                    break
-                    
-        if not output_found:
-            for i, device in enumerate(devices):
-                if device['max_output_channels'] > 0:
-                    self.output_device = i
-                    logger.info(f"🔊 PipeWire: резервное устройство вывода {i}: {device['name']}")
-                    break
-
-    def find_pulseaudio_devices(self, devices):
-        """Поиск устройств для PulseAudio"""
-        logger.info("🔊 Поиск устройств для PulseAudio...")
-        input_found = False
-        output_found = False
-        
-        for i, device in enumerate(devices):
-            name_lower = device['name'].lower()
-            
-            if ('pulse' in name_lower or 'default' in name_lower or
-                'analog' in name_lower or 'built-in' in name_lower):
-                
-                if device['max_input_channels'] > 0 and not input_found:
-                    self.input_device = i
-                    input_found = True
-                    logger.info(f"🔊 PulseAudio: выбрано устройство ввода {i}: {device['name']}")
-                    
-                if device['max_output_channels'] > 0 and not output_found:
-                    self.output_device = i
-                    output_found = True
-                    logger.info(f"🔊 PulseAudio: выбрано устройство вывода {i}: {device['name']}")
-                
-                if input_found and output_found:
-                    break
-        
-        if not input_found:
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0:
-                    self.input_device = i
-                    logger.info(f"🔊 PulseAudio: резервное устройство ввода {i}: {device['name']}")
-                    break
-                    
-        if not output_found:
-            for i, device in enumerate(devices):
-                if device['max_output_channels'] > 0:
-                    self.output_device = i
-                    logger.info(f"🔊 PulseAudio: резервное устройство вывода {i}: {device['name']}")
-                    break
-
-    def find_fallback_devices(self, devices):
-        """Резервный поиск устройств"""
-        logger.info("🔊 Резервный поиск аудиоустройств...")
-        input_found = False
-        output_found = False
-        
-        for i, device in enumerate(devices):
-            if device['max_input_channels'] > 0 and not input_found:
-                self.input_device = i
-                input_found = True
-                logger.info(f"🔊 Fallback: устройство ввода {i}: {device['name']}")
-                
-            if device['max_output_channels'] > 0 and not output_found:
-                self.output_device = i
-                output_found = True
-                logger.info(f"🔊 Fallback: устройство вывода {i}: {device['name']}")
-            
-            if input_found and output_found:
-                break
-        
-        if not input_found or not output_found:
-            for i, device in enumerate(devices):
-                if device['max_input_channels'] > 0 and device['max_output_channels'] > 0:
-                    if not input_found:
-                        self.input_device = i
-                        input_found = True
-                    if not output_found:
-                        self.output_device = i
-                        output_found = True
-                    logger.info(f"🔊 Fallback: комбинированное устройство {i}: {device['name']}")
-                    break
-
+  
     def start_call(self):
         """Начать звонок (после принятия)"""
         try:
             logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
+            logger.info(f"DEBUG: is_outgoing={self.is_outgoing}, start_button exists: {hasattr(self, 'start_button')}")
             
             # Проверяем наличие кнопок
             if not hasattr(self, 'start_button') or self.start_button is None:
@@ -1520,7 +615,7 @@ class CallWindow(QWidget):
             self.start_button.hide()
             if hasattr(self, 'cancel_button') and self.cancel_button:
                 self.cancel_button.hide()
-            self.end_button.show()
+            self.active_buttons_widget.show()
             self.duration_label.setVisible(True)
             
             # Проверяем наличие сокета
@@ -1543,9 +638,8 @@ class CallWindow(QWidget):
             if not self.call_socket:
                 logger.warning("⚠️ Звонок запускается без сокета - будет работать в локальном режиме")
                 self.local_mode = True
-                self.socket_status_label.setText("🔇 Локальный режим (без сетевого аудио)")
-                self.socket_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-            
+                self.status_label.setText("🔇 Локальный режим (без сетевого аудио)")
+                
             # Инициализируем аудио потоки
             if self.local_mode:
                 success = self.initialize_local_audio()
@@ -1557,7 +651,9 @@ class CallWindow(QWidget):
                 self.call_start_time = time.time()
                 self.duration_timer.start(1000)
                 self.duration_label.setVisible(True)
+                self.progress_bar.hide()
                 self.is_active = True
+                
                 
                 # Обновляем статус
                 if self.local_mode:
@@ -1583,6 +679,8 @@ class CallWindow(QWidget):
                 logger.info("⚠️ Аудио уже инициализировано")
                 return True
 
+            logger.info(f"🔧 initialize_audio_streams: call_socket={self.call_socket}, local_mode={self.local_mode}")
+            
             # Определяем режим работы
             if not self.call_socket or self.local_mode:
                 logger.info("🔊 Работа в локальном режиме (без сетевого аудио)")
@@ -1600,17 +698,15 @@ class CallWindow(QWidget):
             # Если устройства не выбраны, используем автовыбор
             if input_device is None:
                 try:
-                    default_input = sd.default.device[0] if sd.default.device else 0
-                    input_device = default_input
+                    input_device = sd.default.device[0] if sd.default.device else None     
                 except:
-                    input_device = 0
+                    input_device = None
                     
             if output_device is None:
                 try:
-                    default_output = sd.default.device[1] if sd.default.device else 0
-                    output_device = default_output
+                    output_device = sd.default.device[1] if sd.default.device else None      
                 except:
-                    output_device = 0
+                    output_device = None
             
             logger.info(f"🔧 Используемые устройства: ввод={input_device}, вывод={output_device}")
             
@@ -1625,13 +721,17 @@ class CallWindow(QWidget):
                 try:
                     logger.info(f"🔧 Попытка конфигурации: {config}")
                     
-                    # ✅ БЕЗОПАСНЫЙ Callback для захвата аудио с микрофона
+                    # ✅ Callback для захвата аудио с микрофона
                     def input_callback(indata, frames, time, status):
                         if status:
                             logger.debug(f"Аудио входной статус: {status}")
                 
                         try:
-                            # ✅ ПРОВЕРЯЕМ ВСЕ УСЛОВИЯ ПЕРЕД ОТПРАВКОЙ
+                            # ✅ Если микрофон отключен, не отправляем данные
+                            if self.muted:
+                                return
+
+
                             if (self.call_socket and 
                                 self.is_active and self.audio_initialized and
                                 not self.local_mode):
@@ -1645,7 +745,7 @@ class CallWindow(QWidget):
                         except Exception as e:
                             logger.debug(f"Ошибка в input callback: {e}")
 
-                    # ✅ БЕЗОПАСНЫЙ Callback для воспроизведения аудио
+                    # Callback для воспроизведения аудио
                     def output_callback(outdata, frames, time, status):
                         if status:
                             logger.debug(f"Аудио выходной статус: {status}")
@@ -1709,7 +809,6 @@ class CallWindow(QWidget):
             
         except Exception as e:
             logger.error(f"❌ Критическая ошибка инициализации аудио: {e}")
-            self.show_audio_error(f"Аудио недоступно: {e}")
             return False
 
     def initialize_local_audio(self):
@@ -1813,12 +912,11 @@ class CallWindow(QWidget):
             self.audio_status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
             self.status_label.setText("🔇 Локальный режим (тестовый)")
             self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-            
             return True
             
         except Exception as e:
-            logger.error(f"❌ Ошибка инициализации локального аудио: {e}")
-            self.show_audio_error(f"Локальное аудио недоступно: {e}")
+            logger.error(f"❌ Локальное аудио неддоступно: {e}")
+            QMessageBox.warning(self, "Ошибка", f"Не удалось запустить локальное аудио: {e}")
             return False
 
     def get_audio_data(self, frames):
@@ -1841,6 +939,9 @@ class CallWindow(QWidget):
 
     def send_audio_data(self, audio_data):
         """Отправка аудио данных с проверкой соединения"""
+        if self.muted:
+            return False
+        
         try:
             if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
                 return False
@@ -2008,154 +1109,22 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.error(f"Ошибка перехода на видеозвонок: {e}")
 
-    def accept_call(self):
-        """Принять входящий звонок"""
-        try:
-            if self.is_active:
-                logger.warning(f"Звонок {self.call_id} уже принят")
-                return
-                
-            logger.info(f"🔊 Принятие входящего звонка {self.call_id}")
-            
-            # Проверяем наличие сокета
-            if not self.call_socket:
-                logger.warning("⚠️ Сокет не установлен, пробуем получить от родителя...")
-
-                if self.parent() and hasattr(self.parent(), 'get_call_socket'):
-                    try:
-                        call_socket = self.parent().get_call_socket(self.call_id)
-                        if call_socket:
-                            success = self.set_call_socket(call_socket)
-                            if success:
-                                logger.info("✅ Сокет получен от родителя")
-                            else:
-                                logger.error("❌ Не удалось установить сокет от родителя")    
-                                QMessageBox.warning(self, "Ошибка", 
-                                              "Не удалось установить соединение. Проверьте подключение.")
-                                return
-                        else:
-                            logger.error("❌ Родитель не вернул сокет")
-                            QMessageBox.warning(self, "Ошибка", 
-                                          "Соединение не установлено. Пожалуйста, попробуйте позже.")
-                            return
-                    except Exception as e:
-                        logger.error(f"❌ Ошибка получения сокета от родителя: {e}")
-                else:
-                    logger.error("❌ Нет доступа к родителю или методу get_call_socket")
-                        
-            # Меняем интерфейс
-            self.accept_button.hide()
-            self.reject_button.hide()
-            self.end_button.show()
-            self.duration_label.setVisible(True)
-
-            # Обновляем статус
-            self.status_label.setText("Звонок принят...")
-            self.title_label.setText("📞 Активный звонок")
-            
-            # Запускаем таймер
-            self.call_start_time = time.time()
-            self.duration_timer.start(1000)
-
-            # Сигнализируем о принятии звонка
-            self.call_accepted.emit(self.call_id)
-            
-            # Инициализируем аудио потоки
-            success = self.initialize_audio_streams()
-            if success:
-                self.is_active = True
-                self.status_label.setText("✅ Звонок активен")
-                self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
-
-                # Если локальный режим, показываем предупреждение
-                if self.local_mode:
-                    self.status_label.setText("🔇 Локальный режим (тестовый)")
-                    self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
-
-                logger.info(f"✅ Звонок {self.call_id} успешно принят")
-            else:
-                logger.error(f"❌ Не удалось инициализировать аудио для звонка {self.call_id}")
-                QMessageBox.warning(self, "Ошибка", 
-                              "Не удалось инициализировать аудио. Проверьте настройки аудиоустройств.")
-
-        except Exception as e:
-            logger.error(f"Ошибка принятия звонка: {e}")
-            traceback.print_exc()
-            QMessageBox.critical(self, "Ошибка", f"Не удалось принять звонок: {e}\n\n{traceback.format_exc()}")
-
-    def reject_call(self):
-        """Отклонить входящий звонок"""
-        logger.info(f"🔊 Отклонение звонка {self.call_id}")
-        self.call_rejected.emit(self.call_id)
-        self.close()
-    
-    def end_call(self):
-        """Завершить активный звонок"""
-        logger.info(f"🔊 Завершение звонка {self.call_id}")
-        
-        # Сигнализируем о завершении
-        self.call_ended.emit(self.call_id)
-        
-        # Закрываем окно
-        self.close()
-    
-    def cancel_call(self):
-        """Отменить исходящий звонок"""
-        logger.info(f"🔊 Отмена звонка {self.call_id}")
-        self.call_ended.emit(self.call_id)
-        self.close()
-
-    def show_audio_error(self, message):
-        """Показать ошибку аудио"""
-        self.diagnostic_label.setText(f"Ошибка: {message}")
-        self.diagnostic_label.setStyleSheet("font-size: 10px; color: #e74c3c;")
-
     def closeEvent(self, event):
         """Обработка закрытия окна"""
         try:
-            logger.info(f"Закрытие окна звонка {self.call_id}")
             self.is_active = False
-        
-            # Останавливаем все таймеры
-            try:
-                if hasattr(self, 'duration_timer') and self.duration_timer.isActive():
-                    self.duration_timer.stop()
-            except:
-                pass
-            
-            try:
-                if hasattr(self, 'diagnostic_timer') and self.diagnostic_timer.isActive():
-                    self.diagnostic_timer.stop()
-            except:
-                pass
-            
-            try:
-                if hasattr(self, 'socket_check_timer') and self.socket_check_timer.isActive():
-                    self.socket_check_timer.stop()
-            except:
-                pass
-            
-            # Останавливаем аудио потоки
+            self.duration_timer.stop()
+            self.socket_check_timer.stop()
             self.stop_audio_streams()
-        
-            # Закрываем сокет
-            try:
-                if self.call_socket:    
+            if self.call_socket:  
+                try:  
                     self.call_socket.close()
-            except:
-                pass
-                
-            # Отправляем сигнал о завершении только один раз
-            if not getattr(self, 'call_ended_emitted', False):
-                try:
-                    self.call_ended.emit(self.call_id)
-                    self.call_ended_emitted = True
-                    logger.info(f"✅ Сигнал завершения звонка {self.call_id} отправлен")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка отправки сигнала завершения: {e}")
+                except:
+                    pass
+            if not self._closing_by_network and not getattr(self, 'call_ended_emitted', False):
+                self.call_ended.emit(self.call_id)
+                self.call_ended_emitted = True
             event.accept()
-            logger.info(f"Окно звонка {self.call_id} закрыто")
-        
         except Exception as e:
             logger.error(f"❌ Критическая ошибка при закрытии окна звонка: {e}")
             event.accept()

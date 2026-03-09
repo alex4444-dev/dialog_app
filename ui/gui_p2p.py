@@ -5,6 +5,7 @@ import threading
 import time
 import logging
 import socket
+
 from typing import List, Dict, Tuple
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
@@ -24,6 +25,7 @@ try:
     from users_panel import UsersPanel
     from chat_window import ChatWindow
     from notifications import NotificationWindow
+    from settings_window import SettingsDialog
     from call_window import CallWindow
     from video_window import VideoCallWindow
     from storage.database import ClientDatabase
@@ -81,6 +83,10 @@ class P2PMainWindow(QMainWindow):
         # Для хранения сокетов звонков
         self.call_sockets = {}  # Словарь для хранения сокетов по call_id
         self.calls_lock = threading.Lock()
+        
+        # Атрибуты для хранения настроек аудио
+        self.audio_input_device = None
+        self.audio_output_device = None
         
         # Таймеры для обновлений
         self.update_timer = QTimer()
@@ -156,6 +162,27 @@ class P2PMainWindow(QMainWindow):
         QTimer.singleShot(1000, self.start_p2p_messaging)
         
         logger.info("P2P интерфейс инициализирован")
+
+    def show_audio_settings(self):
+        """Показать окно настроек аудио"""
+        try:
+            dialog = SettingsDialog(parent=self)
+            # Подключаем сигнал для получения изменённых настроек
+            dialog.settings_changed.connect(self.on_settings_changed)
+            dialog.exec_()
+        except Exception as e:
+            logger.error(f"Ошибка открытия окна настроек: {e}")
+            QMessageBox.critical(self, "Ошибка", f"Не удалось открыть окно настроек:\n{e}")
+
+    def on_settings_changed(self, settings):
+        """Обновить настройки приложения"""
+        print(f"DEBUG: on_settings_changed получил: {type(settings)} -> {settings}")
+        if not isinstance(settings, dict):
+            return
+        self.audio_input_device = settings.get('input_device')
+        self.audio_output_device = settings.get('output_device')
+        logger.info(f"Главное окно: обновлены настройки: ввод={self.audio_input_device}, вывод={self.audio_output_device}")
+        # TODO: оповестить активные звонки, если нужно
         
     def _finalize_call_accept(self, call_id, call_window):
         """Завершающая стадия принятия звонка"""
@@ -245,6 +272,11 @@ class P2PMainWindow(QMainWindow):
         force_connect_action = QAction('🔗 Принудительно подключиться к пирам', self)
         force_connect_action.triggered.connect(self.force_connect_peers)
         file_menu.addAction(force_connect_action)
+        
+        # Команда для вызова Окна настроек
+        settings_action = QAction('⚙️ Настройки', self)
+        settings_action.triggered.connect(self.show_audio_settings)
+        file_menu.addAction(settings_action)
         
         file_menu.addSeparator()
         
@@ -856,6 +888,7 @@ class P2PMainWindow(QMainWindow):
             
             # Создаем окно звонка
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
+            call_window.connection_established.connect(call_window.initialize_audio_when_ready)
             call_window.call_ended.connect(self.end_call)
             
             # Сохраняем в активных звонках
