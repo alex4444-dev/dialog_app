@@ -294,7 +294,7 @@ class SettingsDialog(QDialog):
     # Сигнал, испускаемый при сохранении всех настроек (при OK/Apply)
     settings_changed = pyqtSignal(dict)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, input_device=None, output_device=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки приложения")
         self.setMinimumSize(700, 500)
@@ -302,10 +302,10 @@ class SettingsDialog(QDialog):
 
         # Данные для страниц (здесь можно хранить все настройки)
         self.settings_data = {
-            'input_device': None,
-            'output_device': None,
-            # другие настройки будут добавляться по мере расширения
+            'input_device': input_device,
+            'output_device': output_device,
         }
+
 
         # Основной layout
         main_layout = QHBoxLayout(self)

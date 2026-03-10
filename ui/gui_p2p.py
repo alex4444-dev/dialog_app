@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
                              QMessageBox, QStatusBar, QTextEdit, QDialog,
                              QSystemTrayIcon, QStyle, QDesktopWidget)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings
 from PyQt5.QtGui import QIcon
 
 # Добавляем путь к текущей директории для импорта модулей
@@ -84,10 +84,10 @@ class P2PMainWindow(QMainWindow):
         self.call_sockets = {}  # Словарь для хранения сокетов по call_id
         self.calls_lock = threading.Lock()
         
-        # Атрибуты для хранения настроек аудио
-        self.audio_input_device = None
-        self.audio_output_device = None
-        
+        self.settings = QSettings('DialogApp', 'P2PClient')
+        self.audio_input_device = self.settings.value('audio_input_device', None, type=int)
+        self.audio_output_device = self.settings.value('audio_output_device', None, type=int)
+
         # Таймеры для обновлений
         self.update_timer = QTimer()
         self.update_timer.timeout.connect(self.on_update_timer)
@@ -166,7 +166,9 @@ class P2PMainWindow(QMainWindow):
     def show_audio_settings(self):
         """Показать окно настроек аудио"""
         try:
-            dialog = SettingsDialog(parent=self)
+            dialog = SettingsDialog(parent=self,
+                                    input_device=self.audio_input_device,
+                                    output_device=self.audio_output_device)
             # Подключаем сигнал для получения изменённых настроек
             dialog.settings_changed.connect(self.on_settings_changed)
             dialog.exec_()
@@ -181,6 +183,9 @@ class P2PMainWindow(QMainWindow):
             return
         self.audio_input_device = settings.get('input_device')
         self.audio_output_device = settings.get('output_device')
+        self.settings.setValue('audio_input_device', self.audio_input_device)
+        self.settings.setValue('audio_output_device', self.audio_output_device)
+        self.settings.sync()  # принудительная запись на диск
         logger.info(f"Главное окно: обновлены настройки: ввод={self.audio_input_device}, вывод={self.audio_output_device}")
         # TODO: оповестить активные звонки, если нужно
         
@@ -887,7 +892,7 @@ class P2PMainWindow(QMainWindow):
             logger.info(f"=== ПОКАЗ ВХОДЯЩЕГО ЗВОНКА {call_id} ===")
             
             # Создаем окно звонка
-            call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
+            call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self, input_device=self.audio_input_device, output_device=self.audio_output_device)
             call_window.connection_established.connect(call_window.initialize_audio_when_ready)
             call_window.call_ended.connect(self.end_call)
             
@@ -1182,7 +1187,9 @@ class P2PMainWindow(QMainWindow):
             return
 
         # Создаем окно звонка
-        call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self)
+        call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self,
+                                input_device=self.audio_input_device,
+                                output_device=self.audio_output_device)
         call_window.call_ended.connect(self.end_call)
         
         # Сохраняем информацию о звонке
@@ -1691,7 +1698,9 @@ class P2PMainWindow(QMainWindow):
                 return
 
             # Создаем окно звонка
-            call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self)
+            call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self,
+                                        input_device=self.audio_input_device,
+                                        output_device=self.audio_output_device)
             call_window.call_ended.connect(self.end_call)
             call_window.call_accepted.connect(self.accept_call)
             call_window.call_rejected.connect(self.reject_call)

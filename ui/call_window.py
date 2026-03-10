@@ -5,7 +5,6 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QSizePolicy)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
 from PyQt5.QtGui import QPalette, QColor, QPainter, QPixmap
-
 import logging
 import time
 import struct
@@ -24,7 +23,7 @@ class CallWindow(QWidget):
     call_started = pyqtSignal(str)
     connection_established = pyqtSignal()
     
-    def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None):
+    def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None, input_device=None, output_device=None):
         super().__init__(parent)
         self.username = username
         self.call_type = call_type
@@ -32,6 +31,8 @@ class CallWindow(QWidget):
         self.is_outgoing = is_outgoing
         self.call_socket = None
         self.socket_set = False
+        self.input_device = input_device   # теперь сохраняем переданные устройства
+        self.output_device = output_device
 
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
 
@@ -47,11 +48,6 @@ class CallWindow(QWidget):
         self.channels = 1
         self.dtype = 'float32'
         self.blocksize = 1024
-        
-        # Устройства(Будут задаваться глобально)
-        self.input_device = None
-        self.output_device = None
-        
         
         # Буфер для аудио данных
         self.audio_buffer = []
@@ -113,14 +109,15 @@ class CallWindow(QWidget):
         self.avatar_label.setFixedSize(120, 120)
         self.avatar_label.setAlignment(Qt.AlignCenter)
         self.avatar_label.setStyleSheet("""
+            width: 100px;
+            height: 100px;
             border: 3px solid #3498db;
-            border-radius: 60px;
+            border-radius: 75px;
             background-color: #ecf0f1;
+            font-size: 60px;
+            color: #3498db;
         """)
-        # Загружаем картинку-заглушку (можно заменить на иконку пользователя)
-        pixmap = QPixmap(100, 100)
-        pixmap.fill(QColor(52, 152, 219))
-        self.avatar_label.setPixmap(pixmap)
+        self.avatar_label.setText("👤")
         main_layout.addWidget(self.avatar_label, 0, Qt.AlignCenter)
         
         # Заголовок
@@ -604,6 +601,10 @@ class CallWindow(QWidget):
         try:
             logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
             logger.info(f"DEBUG: is_outgoing={self.is_outgoing}, start_button exists: {hasattr(self, 'start_button')}")
+            
+            call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self,
+                         input_device=self.audio_input_device,
+                         output_device=self.audio_output_device)
             
             # Проверяем наличие кнопок
             if not hasattr(self, 'start_button') or self.start_button is None:
