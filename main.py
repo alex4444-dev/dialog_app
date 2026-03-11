@@ -2,6 +2,7 @@
 import os
 import sys
 import logging
+import yaml
 
 # Настройка логирования
 logging.basicConfig(
@@ -21,6 +22,19 @@ logging.getLogger().setLevel(logging.DEBUG)
 # Добавляем текущую директорию в sys.path ПЕРВОЙ СТРОКОЙ
 current_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, current_dir)
+
+# Загружаем конфигурацию
+config_path = os.path.join(current_dir, 'config.yaml')
+try:
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = yaml.safe_load(f)
+    print("✅ Конфигурация загружена")
+except Exception as e:
+    print(f"❌ Ошибка загрузки config.yaml: {e}")
+    sys.exit(1)
+
+# Получаем bootstrap-узлы
+bootstrap_nodes = config['network']['bootstrap_nodes']
 
 print(f"🚀 Запуск мессенджера Диалог из: {current_dir}")
 
@@ -47,7 +61,7 @@ def main():
     os.makedirs('logs', exist_ok=True)
     
     print("🎯 Инициализация приложения...")
-    app = P2PDialogApplication()
+    app = P2PDialogApplication(bootstrap_nodes=bootstrap_nodes)
     app.run()
     sys.exit(app.app.exec_())
 

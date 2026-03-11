@@ -602,9 +602,6 @@ class CallWindow(QWidget):
             logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
             logger.info(f"DEBUG: is_outgoing={self.is_outgoing}, start_button exists: {hasattr(self, 'start_button')}")
             
-            call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self,
-                         input_device=self.audio_input_device,
-                         output_device=self.audio_output_device)
             
             # Проверяем наличие кнопок
             if not hasattr(self, 'start_button') or self.start_button is None:

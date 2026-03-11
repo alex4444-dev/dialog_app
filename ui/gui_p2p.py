@@ -1947,11 +1947,12 @@ class P2PMainWindow(QMainWindow):
 class P2PDialogApplication:
     """Класс управления P2P приложением"""
     
-    def __init__(self):
+    def __init__(self, bootstrap_nodes=None):
+        self.bootstrap_nodes = bootstrap_nodes or []
         self.app = QApplication(sys.argv)
         self.db = ClientDatabase()
         self.auth_manager = AuthManager(self.db)
-        self.p2p_client = P2PNetworkClient(self.db)
+        self.p2p_client = P2PNetworkClient(self.db, bootstrap_nodes=self.bootstrap_nodes)
         self.auth_window = None
         self.main_window = None
         
@@ -2006,7 +2007,7 @@ class P2PDialogApplication:
         sys.exit(0)
 
 def main():
-    app = P2PDialogApplication()
+    app = P2PDialogApplication(bootstrap_nodes=bootstrap_nodes)
     app.run()
     sys.exit(app.app.exec_())
 

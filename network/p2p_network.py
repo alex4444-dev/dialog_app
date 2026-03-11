@@ -72,7 +72,7 @@ class P2PNetworkClient(QObject):
     connection_status_changed = pyqtSignal(str)
     call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
     
-    def __init__(self, db, port=8890):
+    def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()
         self.db = db
         self.username = None
@@ -86,13 +86,11 @@ class P2PNetworkClient(QObject):
 
         self.media_ports = set()  # Для отслеживания используемых медиа-портов
         
-        # Bootstrap узлы для первоначального подключения
-        self.bootstrap_nodes = [
-            {"host": "192.168.0.105", "port": 8888}
-	        #{"host": "localhost", "port": 8888}
-            
-            # Можно добавить публичные bootstrap узлы
-        ] 
+        # Bootstrap узлы: если переданы, используем их, иначе пустой список
+        if bootstrap_nodes is None:
+            self.bootstrap_nodes = [{"host": "localhost", "port": 8888}]   # или можно оставить localhost как запасной вариант
+        else:
+            self.bootstrap_nodes = bootstrap_nodes
 
         # Система отслеживания сообщений
         self.pending_messages = {}  # message_id -> {data, timestamp, attempts, target_peer}
