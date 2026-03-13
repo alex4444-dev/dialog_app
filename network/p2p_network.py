@@ -102,11 +102,24 @@ class P2PNetworkClient(QObject):
         self.retry_thread.start()  
 
         # ДЛЯ МЕДИА-СОЕДИНЕНИЙ
-        self.media_server_host = 'localhost'
+        self.media_server_host = self._get_local_ip()
         self.media_server_port = 9100
         self.media_sockets = {}  # call_id -> socket
         self.media_connections = {}  # call_id -> media_info
         self.call_requests = {}  # call_id -> call_info
+
+    def _get_local_ip(self) -> str:
+        """Определяет IP-адрес машины в локальной сети (не localhost)."""
+        try:
+            # Подключаемся к внешнему серверу (Google DNS) – это безопасно,
+            # соединение сразу закрывается, данные не отправляются.
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+            return ip
+        except Exception:
+            # Если не удалось определить, возвращаем localhost как запасной вариант
+            return "127.0.0.1"
            
     def connect_to_peer_media(self, call_id, peer_username):
         """Подключение к медиа другого пользователя через центральный сервер"""
@@ -868,6 +881,7 @@ class P2PNetworkClient(QObject):
                 'type': 'media_info',
                 'call_id': call_id,
                 'media_port': 9100,  # фиксированный порт для звонков
+                'media_host': self.media_server_host,
                 'action': 'setup',
                 'timestamp': time.time()
             }
@@ -1788,6 +1802,7 @@ class P2PNetworkClient(QObject):
                     'type': 'media_info',
                     'call_id': call_id,
                     'media_port': call_port,
+                    'media_host': self.media_server_host,
                     'action': 'simple_setup',
                     'timestamp': time.time()
                 }
@@ -1876,7 +1891,7 @@ class P2PNetworkClient(QObject):
 
             # Добавляем информацию о медиа-сервере
             media_info = {
-                'media_server': 'localhost',  # или ваш сервер
+                'media_server': self.media_server_host,  
                 'media_port': 9100,
                 'call_id': call_id
             }
@@ -2100,6 +2115,7 @@ class P2PNetworkClient(QObject):
                 'type': 'media_info',
                 'call_id': call_id,
                 'media_port': media_port,
+                'media_host': self.media_server_host,
                 'action': 'setup',
                 'timestamp': time.time()
             }
@@ -2295,10 +2311,10 @@ class P2PNetworkClient(QObject):
         return None
 
     def _handle_media_info(self, data: dict, peer_id: str):
-        """Обработка информации о медиа-соединении"""
         try:
             call_id = data.get('call_id')
             media_port = data.get('media_port')
+            media_host = data.get('media_host')   # теперь получаем IP
             action = data.get('action')
             
             if not call_id or not media_port:
@@ -2306,24 +2322,27 @@ class P2PNetworkClient(QObject):
                 return
             
             if action == 'setup':
-                # Получаем информацию о пире
-                if peer_id in self.connected_peers:
-                    peer_info = self.connected_peers[peer_id]
-                    peer_host = peer_info['address'][0]
-                    
-                    logger.info(f"🔊 Получена информация о медиа-порте {media_port} для звонка {call_id}")
-                    
-                    # Сохраняем информацию о медиа-соединении
-                    self.call_requests[call_id] = {
-                        'media_port': media_port,
-                        'peer_host': peer_host,
-                        'peer_id': peer_id,
-                        'status': 'pending'
-                    }
-                    
-                    # Отправляем сигнал в GUI для подключения к медиа
-                    self.call_received.emit('media_info', '', '', call_id)
-                    
+                # Если media_host не передан, используем адрес пира (обратная совместимость)
+                if not media_host and peer_id in self.connected_peers:
+                    media_host = self.connected_peers[peer_id]['address'][0]
+                
+                if not media_host:
+                    logger.error(f"❌ Не удалось определить media_host для звонка {call_id}")
+                    return
+                
+                logger.info(f"🔊 Получена информация о медиа: {media_host}:{media_port} для звонка {call_id}")
+                
+                # Сохраняем информацию о медиа-соединении
+                self.call_requests[call_id] = {
+                    'media_port': media_port,
+                    'media_host': media_host,
+                    'peer_id': peer_id,
+                    'status': 'pending'
+                }
+            
+                # Отправляем сигнал в GUI для подключения к медиа
+                self.call_received.emit('media_info', media_host, str(media_port), call_id)
+                
         except Exception as e:
             logger.error(f"❌ Ошибка обработки медиа-информации: {e}")
 

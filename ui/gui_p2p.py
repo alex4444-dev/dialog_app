@@ -474,12 +474,12 @@ class P2PMainWindow(QMainWindow):
             if hasattr(self.p2p_client, 'call_requests') and call_id in self.p2p_client.call_requests:
                 media_info = self.p2p_client.call_requests[call_id]
                 media_port = media_info.get('media_port')
-                peer_host = media_info.get('peer_host')
+                media_host = media_info.get('media_host')
                 
-                logger.info(f"🔊 Подключение к медиа {peer_host}:{media_port} для звонка {call_id}")
+                logger.info(f"🔊 Подключение к медиа {media_host}:{media_port} для звонка {call_id}")
                 
                 # Подключаемся к медиа-серверу
-                if self.p2p_client.connect_to_media(call_id, media_port, peer_host):
+                if self.p2p_client.connect_to_media(call_id, media_port, media_host):
                     logger.info(f"✅ Успешное подключение к медиа для звонка {call_id}")
                     
                     # Получаем сокет и устанавливаем в окне
@@ -978,17 +978,16 @@ class P2PMainWindow(QMainWindow):
             self.logger.error(f"Ошибка получения информации о пирах: {e}")
 
     def _is_bootstrap_peer(self, peer, p2p_client):
-        """Проверяет, является ли пир bootstrap узлом"""
         try:
-            if hasattr(p2p_client, 'bootstrap_nodes'):
-                for node in p2p_client.bootstrap_nodes:
-                    if hasattr(peer, 'host') and hasattr(peer, 'port'):
-                        if peer.host == node['host'] and peer.port == node['port']:
-                            return True
-                    elif isinstance(peer, tuple) and len(peer) == 2:
-                        host, port = peer
-                        if host == node['host'] and port == node['port']:
-                            return True
+            if isinstance(peer, str):
+                host, port_str = peer.split(':')
+                port = int(port_str)
+            else:
+                host = peer.get('host')
+                port = peer.get('port')
+            for node in p2p_client.bootstrap_nodes:
+                if host == node['host'] and port == node['port']:
+                    return True
         except:
             pass
         return False
