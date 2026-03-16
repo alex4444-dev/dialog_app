@@ -4,7 +4,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QProgressBar, QMessageBox,
                              QSizePolicy)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer
-from PyQt5.QtGui import QPalette, QColor, QPainter, QPixmap
+from PyQt5.QtGui import  QRadialGradient, QPalette, QColor, QPainter, QPixmap
 import logging
 import time
 import struct
@@ -89,50 +89,47 @@ class CallWindow(QWidget):
         
     def init_ui(self):
         """Инициализация интерфейса окна звонка"""
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
-        
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint) 
         self.setWindowTitle(f"📞 Звонок с {self.username}")
-        self.setFixedSize(640, 480)
+        self.setFixedSize(650, 480)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(255, 255, 255))
-        self.setPalette(palette)
+        self.setAutoFillBackground(False)
+        
 
         # Главный layout
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
         
-        # ---- Аватар (круглая картинка) ----
-        self.avatar_label = QLabel()
-        self.avatar_label.setFixedSize(120, 120)
-        self.avatar_label.setAlignment(Qt.AlignCenter)
-        self.avatar_label.setStyleSheet("""
-            width: 100px;
-            height: 100px;
-            border: 3px solid #3498db;
-            border-radius: 75px;
-            background-color: #ecf0f1;
-            font-size: 60px;
-            color: #3498db;
-        """)
-        self.avatar_label.setText("👤")
-        main_layout.addWidget(self.avatar_label, 0, Qt.AlignCenter)
-        
         # Заголовок
         title_text = "Исходящий звонок" if self.is_outgoing else "Входящий звонок"
         self.title_label = QLabel(f"📞 {title_text}")
         self.title_label.setAlignment(Qt.AlignCenter)
-        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #2c3e50; margin-bottom: 5px;")
+        self.title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff; margin-bottom: 5px;")
         self.title_label.setWordWrap(True)
         main_layout.addWidget(self.title_label)
         
-
+        # ---- Аватар  ----
+        self.avatar_label = QLabel()
+        # Загружаем изображение
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        img_path = os.path.join(script_dir, "assets", "img", "background.png")
+        pixmap = QPixmap(img_path)
+        if not pixmap.isNull():
+            # Масштабируем до 300x300 (можно изменить)
+            scaled = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.avatar_label.setPixmap(scaled)
+            self.avatar_label.setFixedSize(scaled.size())
+            self.avatar_label.setVisible(True)
+        # Убираем старые стили с рамкой и фоном, делаем прозрачным
+        self.avatar_label.setAlignment(Qt.AlignCenter)
+        self.avatar_label.setStyleSheet("background-color: transparent;")
+        main_layout.addWidget(self.avatar_label, 0, Qt.AlignCenter)
+       
         # Информация о звонке
-        info_label = QLabel(f"Пользователь: {self.username}\nТип: {self.call_type}\nID: {self.call_id}")
+        info_label = QLabel(f"Пользователь: {self.username}")
         info_label.setAlignment(Qt.AlignCenter)
-        info_label.setStyleSheet("font-size: 14px; color: #ffffff; margin-bottom: 10px;")
+        info_label.setStyleSheet("font-size: 14px; color: #ffffff; margin-bottom: 5px;")
         info_label.setWordWrap(True)
         main_layout.addWidget(info_label)
 
@@ -140,7 +137,7 @@ class CallWindow(QWidget):
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
-        self.audio_status_label.setStyleSheet("font-size: 16px; color: #7f8c8d; margin: 5px 0;")
+        self.audio_status_label.setStyleSheet("font-size: 16px; color: #FFFFFF; margin: 5px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
          
@@ -148,14 +145,14 @@ class CallWindow(QWidget):
         # Таймер звонка
         self.duration_label = QLabel("00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
-        self.duration_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #27ae60; background-color: #f8f9fa; padding: 10px; border-radius: 8px; margin: 10px 0; border: 2px solid #dee2e6;")
+        self.duration_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #FFFFFF; background-color: transparent; padding: 3px; margin: 3px 0;")
         self.duration_label.setVisible(False)
         main_layout.addWidget(self.duration_label)
         
         # Статус звонка
         self.status_label = QLabel("Набор номера..." if self.is_outgoing else "Входящий вызов...")
         self.status_label.setAlignment(Qt.AlignCenter)
-        self.status_label.setStyleSheet("font-size: 16px; color: #2c3e50; margin: 10px 0; font-weight: 500; padding: 8px; background-color: #e8f4fc; border-radius: 6px;")
+        self.status_label.setStyleSheet("font-size: 16px; color: #ffffff; margin: 10px 0; font-weight: 500; padding: 5px; background-color: transparent;")
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
         
@@ -512,7 +509,7 @@ class CallWindow(QWidget):
             
             # Обновляем UI в главном потоке
             self.status_label.setText("🟢 Сокет: подключен")
-            self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+            self.status_label.setStyleSheet("font-size: 12px; color: #97def9;")
             
             # Закрываем серверный сокет
             server_socket.close()
@@ -656,10 +653,10 @@ class CallWindow(QWidget):
                 # Обновляем статус
                 if self.local_mode:
                     self.status_label.setText("🔇 Локальный режим (тестовый)")
-                    self.status_label.setStyleSheet("font-size: 12px; color: #e67e22;")
+                    self.status_label.setStyleSheet("font-size: 12px; color: #f6ff4f;")
                 else:
                     self.status_label.setText("✅ Звонок активен")
-                    self.status_label.setStyleSheet("font-size: 12px; color: #27ae60;")
+                    self.status_label.setStyleSheet("font-size: 12px; color: #f7b7fd;")
                 
                 logger.info(f"✅ Звонок {self.call_id} успешно запущен")
             else:
@@ -1130,5 +1127,18 @@ class CallWindow(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), self.palette().color(QPalette.Window))
+        rect = self.rect()
+
+        # Центр окна
+        center = rect.center()
+        # Радиус градиента – половина диагонали, чтобы покрыть все углы
+        radius = max(rect.width(), rect.height()) // 2
+
+        gradient = QRadialGradient(center, radius)
+        # Прозрачный центр – изображение будет видно чётко
+        gradient.setColorAt(0, QColor(0, 0, 0, 100))
+        # Тёмно-синий по краям (можно заменить на любой оттенок)
+        gradient.setColorAt(1, QColor(25, 25, 112, 255))  # MidnightBlue
+
+        painter.fillRect(rect, gradient)
         super().paintEvent(event)
