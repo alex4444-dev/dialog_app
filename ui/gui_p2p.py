@@ -893,7 +893,7 @@ class P2PMainWindow(QMainWindow):
             
             # Создаем окно звонка
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self, input_device=self.audio_input_device, output_device=self.audio_output_device)
-            call_window.connection_established.connect(call_window.initialize_audio_when_ready)
+            call_window.connection_established.connect(call_window.initialize_audio_streams)
             call_window.call_ended.connect(self.end_call)
             
             # Сохраняем в активных звонках

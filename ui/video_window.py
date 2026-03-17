@@ -16,7 +16,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QPushButton, QGroupBox, QSizePolicy, QDialog,
                              QFormLayout, QComboBox, QDialogButtonBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QThread, pyqtSignal as Signal
-from PyQt5.QtGui import QImage, QPixmap, QPainter, QPalette, QColor
+from PyQt5.QtGui import QImage, QPixmap, QPainter, QPalette, QColor, QRadialGradient
 import queue
 
 logger = logging.getLogger('dialog_video')
@@ -357,21 +357,19 @@ class VideoCallWindow(QWidget):
 
         # убираем прозрачность
         self.setAttribute(Qt.WA_TranslucentBackground, False)
-        self.setAutoFillBackground(True)
-        palette = self.palette()
-        palette.setColor(QPalette.Window, QColor(255, 255, 255))
-        self.setPalette(palette)
+        self.setAutoFillBackground(False)
+        
 
         # Устанавливаем стиль для полной непрозрачности
         self.setStyleSheet("""
             QGroupBox {
-                background-color: #f8f9fa;
+                background-color: transparent;
                 border: 2px solid #dee2e6;
                 border-radius: 8px;
                 margin-top: 10px;
                 padding-top: 10px;
                 font-weight: bold;
-                font-size: 14px;
+                font-size: 16px;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
@@ -391,7 +389,7 @@ class VideoCallWindow(QWidget):
         title_label.setStyleSheet("""
             font-size: 18px;
             font-weight: bold;
-            color: #2c3e50;
+            color: #ffffff;
             margin-bottom: 15px;
         """)
         main_layout.addWidget(title_label)
@@ -431,7 +429,7 @@ class VideoCallWindow(QWidget):
             color: #f39c12;
             margin: 10px 0;
             padding: 8px;
-            background-color: #fef9e7;
+            background-color: transparent;
             border-radius: 6px;
         """)
         main_layout.addWidget(self.status_label)
@@ -534,8 +532,9 @@ class VideoCallWindow(QWidget):
         main_layout.addWidget(control_group)
         
         # Кнопки звонка
-        buttons_layout = QHBoxLayout()
-        buttons_layout.setSpacing(20)
+        self.buttons_layout = QHBoxLayout()
+        self.buttons_layout.setSpacing(20)
+        
         
         if self.is_outgoing:
             # Для исходящего звонка
@@ -556,7 +555,7 @@ class VideoCallWindow(QWidget):
                 }
             """)
             self.end_button.clicked.connect(self.end_call)
-            buttons_layout.addWidget(self.end_button)
+            self.buttons_layout.addWidget(self.end_button)       
         else:
             # Для входящего звонка
             self.accept_button = QPushButton("✅ Принять видео")
@@ -595,10 +594,10 @@ class VideoCallWindow(QWidget):
             """)
             self.reject_button.clicked.connect(self.reject_call)
             
-            buttons_layout.addWidget(self.accept_button)
-            buttons_layout.addWidget(self.reject_button)
+            self.buttons_layout.addWidget(self.accept_button)
+            self.buttons_layout.addWidget(self.reject_button)
         
-        main_layout.addLayout(buttons_layout)
+        main_layout.addLayout(self.buttons_layout)
         
         self.setLayout(main_layout)
         
@@ -609,9 +608,12 @@ class VideoCallWindow(QWidget):
         
         # Флаги для улучшения цветов
         self.color_enhancement_enabled = True
-        
+
+    
     def setup_video_capture(self):
         """Настройка захвата видео"""
+        self.stop_video_capture()
+
         try:
             # Находим доступные камеры
             self.available_cameras = self.detect_cameras()
@@ -828,6 +830,7 @@ class VideoCallWindow(QWidget):
         if self.capture_thread:
             self.capture_thread.stop_capture()
             self.capture_thread.wait()
+            self.capture_thread = None   # добавить обнуление ссылки
         if self.video_processor:
             self.video_processor.stop()
         self.local_video_widget.setText("Камера выключена")
@@ -978,6 +981,40 @@ class VideoCallWindow(QWidget):
             logger.error(f"Ошибка установки видео-сокета: {e}")
             return False
     
+    # Добавляем методы для совместимости с CallWindow
+    @property
+    def socket_set(self):
+        """Свойство для совместимости с CallWindow"""
+        return self.video_socket_set
+
+    def set_call_socket(self, socket):
+        """Метод для совместимости с CallWindow"""
+        return self.set_video_socket(socket)
+
+    @property
+    def call_socket(self):
+        """Свойство для совместимости с CallWindow"""
+        return self.video_socket
+
+    def start_call(self):
+        """
+        Начать видеозвонок после получения подтверждения от собеседника.
+        Запускает захват видео, если он ещё не активен.
+        """
+        logger.info("🎥 Запуск видеозвонка")
+        
+        # Если видео включено и поток захвата существует, запускаем его
+        if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
+            self.capture_thread.start()
+            logger.info("🎥 Захват видео запущен")
+        
+        # Обновляем статус
+        self.status_label.setText("🟢 Видеозвонок активен")
+        self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
+        
+        # Если это был исходящий звонок, кнопка завершения уже есть,
+        # для входящего звонка кнопки принять/отклонить уже скрыты в accept_call.
+
     def accept_call(self):
         """Принять видеозвонок"""
         self.call_accepted.emit(self.call_id)
@@ -986,6 +1023,11 @@ class VideoCallWindow(QWidget):
         # Прячем кнопки принятия/отклонения
         self.accept_button.setVisible(False)
         self.reject_button.setVisible(False)
+
+        # Удаляем старую кнопку завершения, если она уже есть (на случай повторного вызова)
+        if hasattr(self, 'end_button') and self.end_button is not None:
+            self.end_button.setParent(None)
+            self.end_button.deleteLater()
         
         # Показываем кнопку завершения
         self.end_button = QPushButton("📹 Завершить видеозвонок")
@@ -1005,7 +1047,7 @@ class VideoCallWindow(QWidget):
             }
         """)
         self.end_button.clicked.connect(self.end_call)
-        self.layout().addWidget(self.end_button)
+        self.buttons_layout.addWidget(self.end_button)
         
         # Запускаем видео
         if self.video_enabled and self.capture_thread:
@@ -1049,5 +1091,17 @@ class VideoCallWindow(QWidget):
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
-        painter.fillRect(self.rect(), self.palette().color(QPalette.Window))
+        rect = self.rect()
+
+        center = rect.center()
+        radius = max(rect.width(), rect.height()) // 2
+        
+        gradient = QRadialGradient(center, radius)
+        # Центр – полупрозрачный тёмный (можно настроить)
+        gradient.setColorAt(0, QColor(10, 10, 50, 150))
+        # Край – насыщенный тёмно-синий
+        gradient.setColorAt(1, QColor(25, 25, 112, 255))
+
+        painter.fillRect(rect, gradient)
+
         super().paintEvent(event)

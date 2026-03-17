@@ -527,18 +527,18 @@ class P2PNetworkClient(QObject):
                         sent_count += 1
                     
                 except Exception as e:
-                    self.logger.debug(f"Ошибка обмена с пиром: {e}")
+                    logger.debug(f"Ошибка обмена с пиром: {e}")
                     # Удаляем проблемного пира
                     if peer in self.connected_peers:
                         self.connected_peers.remove(peer)
                     continue
                 
-                    self.logger.info(f"Обмен информацией о пирах: отправлено {sent_count}/{len(connected_peers_copy)} пирам")
+                    logger.info(f"Обмен информацией о пирах: отправлено {sent_count}/{len(connected_peers_copy)} пирам")
         
             return sent_count > 0
         
         except Exception as e:
-            self.logger.error(f"Ошибка обмена информацией о пирах: {e}")
+            logger.error(f"Ошибка обмена информацией о пирах: {e}")
             return False
 
     def send_to_peer_sync(self, peer, data):
