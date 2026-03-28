@@ -3,15 +3,18 @@
 
 """
 Расширенное окно настроек приложения ДИАЛОГ.
-Содержит вкладки: Основные, Аудио и видео, Горячие клавиши, Сеть и др.
+Содержит вкладки: Основные, Аудио, Видео, Горячие клавиши, Сеть.
 """
 
 import logging
+import cv2
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QWidget,
                              QListWidget, QListWidgetItem, QStackedWidget,
                              QPushButton, QDialogButtonBox, QLabel,
-                             QGroupBox, QComboBox, QMessageBox)
-from PyQt5.QtCore import Qt, pyqtSignal
+                             QGroupBox, QComboBox, QMessageBox,
+                             QCheckBox, QFormLayout)
+from PyQt5.QtCore import Qt, pyqtSignal, QSettings
+from PyQt5.QtGui import QImage, QPixmap
 import sounddevice as sd
 import numpy as np
 
@@ -19,7 +22,7 @@ logger = logging.getLogger('dialog_gui')
 
 
 class GeneralSettingsPage(QWidget):
-    """Вкладка основных настроек (пока заглушка)"""
+    """Вкладка основных настроек (заглушка)"""
     def __init__(self, parent=None):
         super().__init__(parent)
         layout = QVBoxLayout(self)
@@ -28,12 +31,11 @@ class GeneralSettingsPage(QWidget):
         layout.addStretch()
 
 
-class AudioVideoSettingsPage(QWidget):
+class AudioSettingsPage(QWidget):
     """
-    Вкладка настроек аудио и видео.
+    Вкладка настроек аудио.
     Позволяет выбирать устройства ввода/вывода и тестировать их.
     """
-    # Сигнал об изменении настроек аудио (для немедленного применения)
     audio_settings_changed = pyqtSignal(dict)
 
     def __init__(self, current_input=None, current_output=None, parent=None):
@@ -287,25 +289,354 @@ class AudioVideoSettingsPage(QWidget):
             self.test_status_label.setText("❌ Диагностика не пройдена")
 
 
+class VideoSettingsPage(QWidget):
+    """Вкладка настроек видео с предпросмотром"""
+    video_settings_changed = pyqtSignal(dict)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.camera_index = 0
+        self.resolution = (640, 480)
+        self.fps = 30
+        self.quality = 85
+        self.color_enhancement = True
+        self.preview_active = False
+        self.capture_thread = None
+        self.video_processor = None
+        self.available_cameras = []
+
+        self.init_ui()
+        self.detect_cameras()
+        self.load_settings()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        # Группа выбора камеры
+        cam_group = QGroupBox("Камера")
+        cam_layout = QVBoxLayout()
+        self.camera_combo = QComboBox()
+        self.camera_combo.currentIndexChanged.connect(self.on_camera_changed)
+        cam_layout.addWidget(self.camera_combo)
+        cam_group.setLayout(cam_layout)
+        layout.addWidget(cam_group)
+
+        # Группа настроек качества
+        quality_group = QGroupBox("Настройки качества")
+        form_layout = QFormLayout()
+
+        self.resolution_combo = QComboBox()
+        resolutions = [
+            ("320x240", 320, 240),
+            ("640x480", 640, 480),
+            ("800x600", 800, 600),
+            ("1280x720", 1280, 720)
+        ]
+        for name, w, h in resolutions:
+            self.resolution_combo.addItem(name, (w, h))
+        form_layout.addRow("Разрешение:", self.resolution_combo)
+
+        self.fps_combo = QComboBox()
+        fps_options = [(f"{f} FPS", f) for f in [15, 30, 60]]
+        for name, f in fps_options:
+            self.fps_combo.addItem(name, f)
+        form_layout.addRow("Частота кадров:", self.fps_combo)
+
+        self.quality_combo = QComboBox()
+        qualities = [
+            ("Низкое (60)", 60),
+            ("Среднее (75)", 75),
+            ("Высокое (90)", 90),
+            ("Оригинальное (95)", 95)
+        ]
+        for name, q in qualities:
+            self.quality_combo.addItem(name, q)
+        form_layout.addRow("Качество JPEG:", self.quality_combo)
+
+        self.color_enhance_check = QCheckBox("Улучшение цветов")
+        self.color_enhance_check.setChecked(True)
+        form_layout.addRow(self.color_enhance_check)
+
+        quality_group.setLayout(form_layout)
+        layout.addWidget(quality_group)
+
+        # Группа предпросмотра
+        preview_group = QGroupBox("Предпросмотр видео")
+        preview_layout = QVBoxLayout()
+        self.preview_label = QLabel()
+        self.preview_label.setMinimumSize(320, 240)
+        self.preview_label.setStyleSheet("background-color: black;")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setText("Камера не выбрана")
+        preview_layout.addWidget(self.preview_label)
+
+        btn_layout = QHBoxLayout()
+        self.start_preview_btn = QPushButton("▶️ Запустить предпросмотр")
+        self.start_preview_btn.clicked.connect(self.start_preview)
+        self.stop_preview_btn = QPushButton("⏹️ Остановить предпросмотр")
+        self.stop_preview_btn.clicked.connect(self.stop_preview)
+        self.stop_preview_btn.setEnabled(False)
+        btn_layout.addWidget(self.start_preview_btn)
+        btn_layout.addWidget(self.stop_preview_btn)
+        preview_layout.addLayout(btn_layout)
+
+        preview_group.setLayout(preview_layout)
+        layout.addWidget(preview_group)
+
+        # Кнопка применения
+        self.apply_btn = QPushButton("Применить")
+        self.apply_btn.clicked.connect(self.apply_settings)
+        layout.addWidget(self.apply_btn)
+
+        layout.addStretch()
+
+        # Подключаем сигналы изменения настроек для динамического обновления предпросмотра
+        self.resolution_combo.currentIndexChanged.connect(self.on_resolution_changed)
+        self.fps_combo.currentIndexChanged.connect(self.on_fps_changed)
+        self.quality_combo.currentIndexChanged.connect(self.on_quality_changed)
+        self.color_enhance_check.stateChanged.connect(self.on_color_enhance_changed)
+
+    def detect_cameras(self):
+        """Обнаружение доступных камер"""
+        self.available_cameras = []
+        for i in range(4):
+            try:
+                cap = cv2.VideoCapture(i)
+                if cap.isOpened():
+                    ret, frame = cap.read()
+                    if ret and frame is not None:
+                        self.available_cameras.append(i)
+                    cap.release()
+            except:
+                pass
+        self.camera_combo.clear()
+        if self.available_cameras:
+            for idx in self.available_cameras:
+                self.camera_combo.addItem(f"Камера {idx}", idx)
+        else:
+            self.camera_combo.addItem("Камеры не найдены", -1)
+            self.camera_combo.setEnabled(False)
+            self.start_preview_btn.setEnabled(False)
+
+    def load_settings(self):
+        settings = QSettings('DialogApp', 'P2PClient')
+        self.camera_index = settings.value('video_camera_index', 0, type=int)
+        if self.camera_index not in self.available_cameras:
+            self.camera_index = self.available_cameras[0] if self.available_cameras else -1
+        if self.camera_index != -1:
+            idx = self.camera_combo.findData(self.camera_index)
+            if idx >= 0:
+                self.camera_combo.setCurrentIndex(idx)
+
+        res_w = settings.value('video_resolution_width', 640, type=int)
+        res_h = settings.value('video_resolution_height', 480, type=int)
+        self.resolution = (res_w, res_h)
+        for i in range(self.resolution_combo.count()):
+            w, h = self.resolution_combo.itemData(i)
+            if w == res_w and h == res_h:
+                self.resolution_combo.setCurrentIndex(i)
+                break
+
+        self.fps = settings.value('video_fps', 30, type=int)
+        for i in range(self.fps_combo.count()):
+            if self.fps_combo.itemData(i) == self.fps:
+                self.fps_combo.setCurrentIndex(i)
+                break
+
+        self.quality = settings.value('video_quality', 85, type=int)
+        for i in range(self.quality_combo.count()):
+            if self.quality_combo.itemData(i) == self.quality:
+                self.quality_combo.setCurrentIndex(i)
+                break
+
+        self.color_enhancement = settings.value('video_color_enhancement', True, type=bool)
+        self.color_enhance_check.setChecked(self.color_enhancement)
+
+    def save_settings(self):
+        settings = QSettings('DialogApp', 'P2PClient')
+        settings.setValue('video_camera_index', self.camera_index)
+        settings.setValue('video_resolution_width', self.resolution[0])
+        settings.setValue('video_resolution_height', self.resolution[1])
+        settings.setValue('video_fps', self.fps)
+        settings.setValue('video_quality', self.quality)
+        settings.setValue('video_color_enhancement', self.color_enhancement)
+
+    def on_camera_changed(self):
+        if self.preview_active:
+            self.stop_preview()
+            self.start_preview()
+
+    def on_resolution_changed(self):
+        if self.preview_active:
+            self.stop_preview()
+            self.start_preview()
+
+    def on_fps_changed(self):
+        if self.preview_active:
+            self.stop_preview()
+            self.start_preview()
+
+    def on_quality_changed(self):
+        pass  # Качество влияет только на сжатие, предпросмотр не требует перезапуска
+
+    def on_color_enhance_changed(self):
+        self.color_enhancement = self.color_enhance_check.isChecked()
+
+    def start_preview(self):
+        if self.preview_active:
+            self.stop_preview()
+
+        if self.camera_index == -1:
+            self.preview_label.setText("Камера не выбрана")
+            return
+
+        try:
+            from video_window import VideoCaptureThread, VideoProcessor
+        except ImportError:
+            from .video_window import VideoCaptureThread, VideoProcessor
+
+        # Получаем текущие настройки
+        res_data = self.resolution_combo.currentData()
+        if res_data:
+            width, height = res_data
+        else:
+            width, height = 640, 480
+        self.resolution = (width, height)
+
+        fps = self.fps_combo.currentData()
+        if fps:
+            self.fps = fps
+
+        quality = self.quality_combo.currentData()
+        if quality:
+            self.quality = quality
+
+        self.color_enhancement = self.color_enhance_check.isChecked()
+
+        # Создаём поток захвата
+        self.capture_thread = VideoCaptureThread(
+            camera_index=self.camera_index,
+            width=width,
+            height=height,
+            fps=fps
+        )
+        self.video_processor = VideoProcessor()
+        self.video_processor.start()
+
+        self.capture_thread.frame_ready.connect(self.on_frame_received)
+        self.capture_thread.start()
+
+        self.preview_active = True
+        self.start_preview_btn.setEnabled(False)
+        self.stop_preview_btn.setEnabled(True)
+
+    def on_frame_received(self, frame):
+        """Обработка кадра для предпросмотра"""
+        if frame is None:
+            return
+        if self.color_enhancement:
+            self.video_processor.put_frame(frame)
+            processed = self.video_processor.get_processed_frame()
+            if processed is not None:
+                frame = processed
+        # Конвертация в QImage и отображение
+        if len(frame.shape) == 3:
+            if frame.shape[2] == 4:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
+            elif frame.shape[2] == 3:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+        qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        self.preview_label.setPixmap(QPixmap.fromImage(qt_image).scaled(
+            self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        self.preview_label.setText("")
+
+    def stop_preview(self):
+        if self.capture_thread:
+            self.capture_thread.stop_capture()
+            self.capture_thread.wait()
+            self.capture_thread = None
+        if self.video_processor:
+            self.video_processor.stop()
+            self.video_processor = None
+        self.preview_active = False
+        self.preview_label.clear()
+        self.preview_label.setText("Предпросмотр остановлен")
+        self.start_preview_btn.setEnabled(True)
+        self.stop_preview_btn.setEnabled(False)
+
+    def apply_settings(self):
+        # Сохраняем настройки из текущих комбобоксов
+        self.camera_index = self.camera_combo.currentData()
+        if self.camera_index == -1:
+            self.camera_index = 0
+
+        res_data = self.resolution_combo.currentData()
+        if res_data:
+            self.resolution = res_data
+
+        fps = self.fps_combo.currentData()
+        if fps:
+            self.fps = fps
+
+        quality = self.quality_combo.currentData()
+        if quality:
+            self.quality = quality
+
+        self.color_enhancement = self.color_enhance_check.isChecked()
+
+        self.save_settings()
+        self.video_settings_changed.emit({
+            'camera_index': self.camera_index,
+            'resolution': self.resolution,
+            'fps': self.fps,
+            'quality': self.quality,
+            'color_enhancement': self.color_enhancement
+        })
+
+    def closeEvent(self, event):
+        self.stop_preview()
+        event.accept()
+
+
+class HotkeysSettingsPage(QWidget):
+    """Вкладка горячих клавиш (заглушка)"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Настройки горячих клавиш"))
+        layout.addWidget(QLabel("Здесь будут настройки комбинаций клавиш"))
+        layout.addStretch()
+
+
+class NetworkSettingsPage(QWidget):
+    """Вкладка сетевых настроек (заглушка)"""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel("Сетевые настройки"))
+        layout.addWidget(QLabel("Здесь будут настройки P2P сети, прокси и т.д."))
+        layout.addStretch()
+
+
 class SettingsDialog(QDialog):
     """
     Главное диалоговое окно настроек с навигацией по категориям.
     """
-    # Сигнал, испускаемый при сохранении всех настроек (при OK/Apply)
     settings_changed = pyqtSignal(dict)
 
     def __init__(self, parent=None, input_device=None, output_device=None):
         super().__init__(parent)
         self.setWindowTitle("Настройки приложения")
-        self.setMinimumSize(700, 500)
+        self.setMinimumSize(825, 500)
+        self.setMaximumSize(985, 600)
         self.setModal(True)
 
-        # Данные для страниц (здесь можно хранить все настройки)
         self.settings_data = {
             'input_device': input_device,
             'output_device': output_device,
         }
-
 
         # Основной layout
         main_layout = QHBoxLayout(self)
@@ -337,21 +668,40 @@ class SettingsDialog(QDialog):
 
         # Создаём страницы
         self.general_page = GeneralSettingsPage()
-        self.audio_video_page = AudioVideoSettingsPage(
+        self.audio_page = AudioSettingsPage(
             current_input=self.settings_data['input_device'],
             current_output=self.settings_data['output_device']
         )
+        self.video_page = VideoSettingsPage()
+        self.hotkeys_page = HotkeysSettingsPage()
+        self.network_page = NetworkSettingsPage()
 
-        # Добавляем в стек
-        self.stacked_widget.addWidget(self.general_page)
-        self.stacked_widget.addWidget(self.audio_video_page)
+        # Обёртываем каждую страницу в QScrollArea
+        from PyQt5.QtWidgets import QScrollArea
+
+        def wrap_with_scroll(widget):
+            scroll = QScrollArea()
+            scroll.setWidget(widget)
+            scroll.setWidgetResizable(True)
+            scroll.setFrameShape(QScrollArea.NoFrame)
+            return scroll
+
+
+
+        # Добавляем в стек в правильном порядке (соответствует индексам навигации)
+        self.stacked_widget.addWidget(wrap_with_scroll(self.general_page))   # индекс 0
+        self.stacked_widget.addWidget(wrap_with_scroll(self.audio_page))     # индекс 1
+        self.stacked_widget.addWidget(wrap_with_scroll(self.video_page))     # индекс 2
+        self.stacked_widget.addWidget(wrap_with_scroll(self.hotkeys_page))   # индекс 3
+        self.stacked_widget.addWidget(wrap_with_scroll(self.network_page))   # индекс 4
 
         # Добавляем пункты навигации
         items = [
             ("Основные", 0),
-            ("Аудио и видео", 1),
-            ("Горячие клавиши", 2),  # пока без страницы
-            ("Сеть", 3)               # пока без страницы
+            ("Аудио", 1),
+            ("Видео", 2),
+            ("Горячие клавиши", 3),
+            ("Сеть", 4)
         ]
         for text, idx in items:
             item = QListWidgetItem(text)
@@ -368,7 +718,6 @@ class SettingsDialog(QDialog):
         button_box.button(QDialogButtonBox.Apply).clicked.connect(self.apply_settings)
 
         # Добавляем кнопки внизу (под стеком, на всю ширину)
-        # Для этого создаём вертикальный layout, в котором стек и кнопки
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.stacked_widget)
         right_layout.addWidget(button_box)
@@ -377,8 +726,9 @@ class SettingsDialog(QDialog):
         main_layout.removeWidget(self.stacked_widget)
         main_layout.addLayout(right_layout, 1)
 
-        # Подключаем сигналы от страницы аудио, чтобы обновлять внутренние данные
-        self.audio_video_page.audio_settings_changed.connect(self.on_audio_settings_changed)
+        # Подключаем сигналы от страниц
+        self.audio_page.audio_settings_changed.connect(self.on_audio_settings_changed)
+        self.video_page.video_settings_changed.connect(self.on_video_settings_changed)
 
         # Выбираем первый пункт
         self.nav_list.setCurrentRow(0)
@@ -392,25 +742,22 @@ class SettingsDialog(QDialog):
             self.stacked_widget.setCurrentIndex(idx)
 
     def on_audio_settings_changed(self, settings):
-        """Обновить внутренние данные при изменении настроек аудио"""
         logger.debug(f"on_audio_settings_changed received: {settings}")
         self.settings_data.update(settings)
 
+    def on_video_settings_changed(self, settings):
+        self.settings_data.update(settings)
+        logger.debug(f"Видеонастройки обновлены: {settings}")
+
     def apply_settings(self):
         """Применить все настройки (испускает сигнал)"""
-        # Собираем все настройки со страниц
-        # Пока только аудио, но можно добавить и другие
-        print(f"DEBUG: apply_settings отправляет: {self.settings_data}")
         self.settings_changed.emit(self.settings_data)
         logger.info("Настройки применены")
-        # Можно показать уведомление
         QMessageBox.information(self, "Настройки", "Настройки сохранены.")
 
     def accept(self):
-        """При OK: применяем и закрываем"""
         self.apply_settings()
         super().accept()
 
     def reject(self):
-        """При Cancel: просто закрываем без сохранения"""
         super().reject()

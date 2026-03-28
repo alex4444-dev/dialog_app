@@ -323,15 +323,34 @@ class VideoCallWindow(QWidget):
     call_rejected = pyqtSignal(str)
     video_toggled = pyqtSignal(bool)
     
-    def __init__(self, username, call_id, is_outgoing=True, parent=None):
+    def __init__(self, username, call_id, is_outgoing=True, parent=None,
+                 camera_index=0, resolution=(640,480), fps=30, quality=85, color_enhancement=True,
+                 input_device=None, output_device=None):
         super().__init__(parent)
         self.username = username
         self.call_id = call_id
         self.is_outgoing = is_outgoing
+
+        # Создаем аудиопоток для звука
+        from call_window import CallWindow
+        self.audio_call = CallWindow(username, 'audio', call_id, is_outgoing, parent=self,
+                                    input_device=input_device, output_device=output_device)
+        self.audio_call.setVisible(False)          # не показываем окно
         
+
+        # Перехватываем любые попытки показать окно и скрываем их
+        self.audio_call.showEvent = lambda e: self.audio_call.hide()
+            
         # Видео параметры
+        self.camera_index = camera_index
+        self.resolution = resolution
+        self.fps = fps
+        self.quality = quality
+        self.color_enhancement = color_enhancement
+        self.color_enhancement_enabled = self.color_enhancement  # для совместимости с обработчиком
         self.video_enabled = True
-        self.camera_index = 0
+        
+        # Компоненты
         self.capture_thread = None
         self.video_processor = VideoProcessor()
         
@@ -355,12 +374,9 @@ class VideoCallWindow(QWidget):
         self.setMaximumSize(1240, 650)
         self.resize(1024, 768)
 
-        # убираем прозрачность
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
         
-
-        # Устанавливаем стиль для полной непрозрачности
         self.setStyleSheet("""
             QGroupBox {
                 background-color: transparent;
@@ -435,7 +451,7 @@ class VideoCallWindow(QWidget):
         main_layout.addWidget(self.status_label)
         
         # Информация о качестве
-        self.quality_label = QLabel("Качество: 640x480 @ 30fps")
+        self.quality_label = QLabel(f"Качество: {self.resolution[0]}x{self.resolution[1]} @ {self.fps}fps")
         self.quality_label.setAlignment(Qt.AlignCenter)
         self.quality_label.setStyleSheet("""
             font-size: 12px;
@@ -468,10 +484,10 @@ class VideoCallWindow(QWidget):
         self.video_toggle_button.clicked.connect(self.toggle_video)
         control_layout.addWidget(self.video_toggle_button)
         
-        # Кнопка смены камеры
-        self.switch_camera_button = QPushButton("🔄 Сменить камеру")
-        self.switch_camera_button.setFixedHeight(40)
-        self.switch_camera_button.setStyleSheet("""
+        # Кнопка настроек видео
+        self.settings_button = QPushButton("⚙️ Настройки видео")
+        self.settings_button.setFixedHeight(40)
+        self.settings_button.setStyleSheet("""
             QPushButton {
                 background-color: #9b59b6;
                 color: white;
@@ -485,48 +501,8 @@ class VideoCallWindow(QWidget):
                 background-color: #8e44ad;
             }
         """)
-        self.switch_camera_button.clicked.connect(self.switch_camera)
-        control_layout.addWidget(self.switch_camera_button)
-        
-        # Кнопка настроек качества
-        self.quality_button = QPushButton("⚙️ Качество")
-        self.quality_button.setFixedHeight(40)
-        self.quality_button.setStyleSheet("""
-            QPushButton {
-                background-color: #1abc9c;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 5px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #16a085;
-            }
-        """)
-        self.quality_button.clicked.connect(self.show_quality_settings)
-        control_layout.addWidget(self.quality_button)
-        
-        # Кнопка улучшения цветов
-        self.color_button = QPushButton("🎨 Улучшить цвета")
-        self.color_button.setFixedHeight(40)
-        self.color_button.setStyleSheet("""
-            QPushButton {
-                background-color: #e67e22;
-                color: white;
-                border: none;
-                padding: 8px 16px;
-                border-radius: 5px;
-                font-weight: bold;
-                font-size: 13px;
-            }
-            QPushButton:hover {
-                background-color: #d35400;
-            }
-        """)
-        self.color_button.clicked.connect(self.toggle_color_enhancement)
-        control_layout.addWidget(self.color_button)
+        self.settings_button.clicked.connect(self.open_video_settings)
+        control_layout.addWidget(self.settings_button)
         
         control_group.setLayout(control_layout)
         main_layout.addWidget(control_group)
@@ -534,7 +510,6 @@ class VideoCallWindow(QWidget):
         # Кнопки звонка
         self.buttons_layout = QHBoxLayout()
         self.buttons_layout.setSpacing(20)
-        
         
         if self.is_outgoing:
             # Для исходящего звонка
@@ -606,10 +581,6 @@ class VideoCallWindow(QWidget):
         self.ui_timer.timeout.connect(self.update_ui)
         self.ui_timer.start(33)  # ~30 FPS для UI
         
-        # Флаги для улучшения цветов
-        self.color_enhancement_enabled = True
-
-    
     def setup_video_capture(self):
         """Настройка захвата видео"""
         self.stop_video_capture()
@@ -629,9 +600,9 @@ class VideoCallWindow(QWidget):
             # Создаем и настраиваем поток захвата видео
             self.capture_thread = VideoCaptureThread(
                 camera_index=self.camera_index,
-                width=640,
-                height=480,
-                fps=30
+                width=self.resolution[0],
+                height=self.resolution[1],
+                fps=self.fps
             )
             
             # Подключаем сигнал готового кадра
@@ -651,13 +622,10 @@ class VideoCallWindow(QWidget):
     def detect_cameras(self):
         """Обнаружение доступных камер"""
         cameras = []
-        
-        # Пробуем несколько индексов камер
         for i in range(4):
             try:
                 cap = cv2.VideoCapture(i)
                 if cap.isOpened():
-                    # Пробуем прочитать тестовый кадр
                     ret, frame = cap.read()
                     if ret and frame is not None:
                         logger.info(f"Найдена камера {i}: {frame.shape}")
@@ -665,7 +633,6 @@ class VideoCallWindow(QWidget):
                     cap.release()
             except Exception as e:
                 logger.debug(f"Ошибка проверки камеры {i}: {e}")
-                
         return cameras
     
     def handle_frame_ready(self, frame):
@@ -709,7 +676,7 @@ class VideoCallWindow(QWidget):
                 frame_rgb = frame
             
             # Сжимаем кадр в JPEG для уменьшения размера
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 85]
+            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
             success, encoded = cv2.imencode('.jpg', frame_rgb, encode_param)
             
             if success:
@@ -731,9 +698,8 @@ class VideoCallWindow(QWidget):
     def receive_video_frame(self):
         """Прием кадра видео"""
         try:
-            if not self.video_socket:
+            if not self.video_socket or self.video_socket.fileno() == -1:
                 return None
-            
             # Чтение заголовка
             header = self.video_socket.recv(12)  # 3 int по 4 байта
             if len(header) < 12:
@@ -760,6 +726,12 @@ class VideoCallWindow(QWidget):
                     return frame
             
             return None
+        except OSError as e:
+            if e.errno == 9:
+                logger.warning("Сокет закрыт при приёме кадра")
+            else:
+                logger.error(f"Ошибка приёма видео: {e}")
+            return None
             
         except Exception as e:
             logger.error(f"Ошибка приема видео: {e}")
@@ -768,12 +740,20 @@ class VideoCallWindow(QWidget):
     def receive_video_loop(self):
         """Цикл приема видео"""
         try:
-            while self.video_socket_set:
+            while self.video_socket_set and self.video_socket:
+                # Проверяем, не закрыт ли сокет
+                if self.video_socket.fileno() == -1:
+                    logger.warning("Видео-сокет закрыт, выходим из цикла приёма")
+                    break
                 frame = self.receive_video_frame()
                 if frame is not None:
                     self.remote_frame = frame
                 time.sleep(0.001)
-                
+        except OSError as e:
+            if e.errno == 9:  # Bad file descriptor
+                logger.warning("Видео-сокет был закрыт во время приёма")
+            else:
+                logger.error(f"Ошибка в receive_video_loop: {e}")
         except Exception as e:
             logger.error(f"Ошибка в receive_video_loop: {e}")
         finally:
@@ -822,7 +802,6 @@ class VideoCallWindow(QWidget):
             self.stop_video_capture()
             self.status_label.setText("❌ Видео отключено")
         
-        # Сигнал для родительского окна
         self.video_toggled.emit(self.video_enabled)
     
     def stop_video_capture(self):
@@ -830,190 +809,96 @@ class VideoCallWindow(QWidget):
         if self.capture_thread:
             self.capture_thread.stop_capture()
             self.capture_thread.wait()
-            self.capture_thread = None   # добавить обнуление ссылки
+            self.capture_thread = None
         if self.video_processor:
             self.video_processor.stop()
         self.local_video_widget.setText("Камера выключена")
         logger.info("Захват видео остановлен")
     
-    def switch_camera(self):
-        """Смена камеры"""
-        if not self.available_cameras:
-            return
+    def open_video_settings(self):
+        """Открыть окно настроек видео"""
+        was_running = self.capture_thread and self.capture_thread.isRunning()
+        if was_running:
+            self.stop_video_capture()
         
-        self.camera_index = (self.camera_index + 1) % len(self.available_cameras)
+        from settings_window import SettingsDialog
+        dlg = SettingsDialog(parent=self,
+                             input_device=None,
+                             output_device=None)
         
-        # Остановка текущей камеры
-        self.stop_video_capture()
-        
-        # Запуск новой камеры
-        time.sleep(0.5)
-        self.setup_video_capture()
-        
-        if self.video_enabled:
-            if self.capture_thread:
-                self.capture_thread.start()
-        
-        self.status_label.setText(f"📷 Камера {self.camera_index + 1}")
-    
-    def toggle_color_enhancement(self):
-        """Включение/выключение улучшения цветов"""
-        self.color_enhancement_enabled = not self.color_enhancement_enabled
-        
-        if self.color_enhancement_enabled:
-            self.color_button.setText("🎨 Улучшить цвета")
-            self.color_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e67e22;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #d35400;
-                }
-            """)
-            self.status_label.setText("🎨 Улучшение цветов включено")
-        else:
-            self.color_button.setText("🎨 Включить улучшение")
-            self.color_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #95a5a6;
-                    color: white;
-                    border: none;
-                    padding: 8px 16px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 13px;
-                }
-                QPushButton:hover {
-                    background-color: #7f8c8d;
-                }
-            """)
-            self.status_label.setText("🎨 Улучшение цветов выключено")
-    
-    def show_quality_settings(self):
-        """Показать настройки качества"""
-        dialog = QDialog(self)
-        dialog.setWindowTitle("Настройки качества видео")
-        dialog.setFixedSize(350, 250)
-        
-        layout = QFormLayout()
-        
-        # Выбор разрешения
-        resolution_combo = QComboBox()
-        resolutions = [
-            ("320x240 (низкое)", 320, 240),
-            ("640x480 (среднее)", 640, 480),
-            ("800x600 (хорошее)", 800, 600),
-            ("1280x720 (HD)", 1280, 720)
-        ]
-        
-        for name, w, h in resolutions:
-            resolution_combo.addItem(name, (w, h))
-        
-        layout.addRow("Разрешение:", resolution_combo)
-        
-        # Выбор FPS
-        fps_combo = QComboBox()
-        fps_options = [("15 FPS", 15), ("30 FPS", 30), ("60 FPS", 60)]
-        for name, fps in fps_options:
-            fps_combo.addItem(name, fps)
-        
-        layout.addRow("Частота кадров:", fps_combo)
-        
-        # Выбор качества сжатия
-        quality_combo = QComboBox()
-        quality_options = [
-            ("Низкое (быстрая передача)", 60),
-            ("Среднее", 75),
-            ("Высокое (лучшие цвета)", 90),
-            ("Оригинальное", 95)
-        ]
-        for name, quality in quality_options:
-            quality_combo.addItem(name, quality)
-        
-        layout.addRow("Качество видео:", quality_combo)
-        
-        # Кнопки
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.accepted.connect(dialog.accept)
-        buttons.rejected.connect(dialog.reject)
-        layout.addRow(buttons)
-        
-        dialog.setLayout(layout)
-        
-        if dialog.exec_() == QDialog.Accepted:
-            # Применение настроек
-            w, h = resolution_combo.currentData()
-            fps = fps_combo.currentData()
-            quality = quality_combo.currentData()
+        # Сохраняем ссылку на was_running для использования в обработчике
+        def on_video_settings_changed(settings):
+            if 'camera_index' in settings:
+                self.camera_index = settings['camera_index']
+            if 'resolution' in settings:
+                self.resolution = settings['resolution']
+                # Обновляем отображение качества
+                self.quality_label.setText(f"Качество: {self.resolution[0]}x{self.resolution[1]} @ {self.fps}fps")
+            if 'fps' in settings:
+                self.fps = settings['fps']
+                self.quality_label.setText(f"Качество: {self.resolution[0]}x{self.resolution[1]} @ {self.fps}fps")
+            if 'quality' in settings:
+                self.quality = settings['quality']
+            if 'color_enhancement' in settings:
+                self.color_enhancement = settings['color_enhancement']
+                self.color_enhancement_enabled = self.color_enhancement
             
-            logger.info(f"Новые настройки видео: {w}x{h} @ {fps}fps, качество: {quality}")
-            
-            self.quality_label.setText(f"Качество: {w}x{h} @ {fps}fps")
-            
-            # Перезапуск камеры с новыми настройками
             if self.video_enabled:
-                self.stop_video_capture()
-                time.sleep(0.5)
                 self.setup_video_capture()
-                if self.capture_thread:
+                if was_running and self.capture_thread:
                     self.capture_thread.start()
+        
+        dlg.settings_changed.connect(on_video_settings_changed)
+        dlg.exec_()
     
     def set_video_socket(self, socket):
         """Установка сокета для видео"""
+        self.video_socket = socket
+        self.video_socket_set = True
+            
+        # Запуск потока для приема видео
+        self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
+        self.receive_thread.start()
+            
+        self.status_label.setText("🟢 Видео-соединение установлено")
+        return True
+            
+    def set_audio_socket(self, socket):
+        """Установить аудио-сокет в скрытое окно"""
+        result = False
         try:
-            self.video_socket = socket
-            self.video_socket_set = True
-            
-            # Запуск потока для приема видео
-            self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
-            self.receive_thread.start()
-            
-            self.status_label.setText("🟢 Видео-соединение установлено")
-            return True
-            
+            if hasattr(self.audio_call, 'set_call_socket'):
+                result = self.audio_call.set_call_socket(socket)
+            self.audio_call.hide()
+            if result:
+                if hasattr(self.audio_call, 'initialize_audio_streams'):
+                    self.audio_call.initialize_audio_streams()
         except Exception as e:
-            logger.error(f"Ошибка установки видео-сокета: {e}")
-            return False
+            logger.error(f"Ошибка установки аудио-сокета: {e}")
+            result = False
+        return result
     
-    # Добавляем методы для совместимости с CallWindow
+    # Методы для совместимости с CallWindow
     @property
     def socket_set(self):
-        """Свойство для совместимости с CallWindow"""
         return self.video_socket_set
 
     def set_call_socket(self, socket):
-        """Метод для совместимости с CallWindow"""
         return self.set_video_socket(socket)
 
     @property
     def call_socket(self):
-        """Свойство для совместимости с CallWindow"""
         return self.video_socket
 
     def start_call(self):
-        """
-        Начать видеозвонок после получения подтверждения от собеседника.
-        Запускает захват видео, если он ещё не активен.
-        """
+        """Начать видеозвонок после получения подтверждения"""
         logger.info("🎥 Запуск видеозвонка")
-        
-        # Если видео включено и поток захвата существует, запускаем его
         if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
             self.capture_thread.start()
             logger.info("🎥 Захват видео запущен")
-        
-        # Обновляем статус
+        self.audio_call.start_call()          # запускает аудио‑потоки
         self.status_label.setText("🟢 Видеозвонок активен")
         self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
-        
-        # Если это был исходящий звонок, кнопка завершения уже есть,
-        # для входящего звонка кнопки принять/отклонить уже скрыты в accept_call.
 
     def accept_call(self):
         """Принять видеозвонок"""
@@ -1023,8 +908,8 @@ class VideoCallWindow(QWidget):
         # Прячем кнопки принятия/отклонения
         self.accept_button.setVisible(False)
         self.reject_button.setVisible(False)
-
-        # Удаляем старую кнопку завершения, если она уже есть (на случай повторного вызова)
+        
+        # Удаляем старую кнопку завершения, если она уже есть
         if hasattr(self, 'end_button') and self.end_button is not None:
             self.end_button.setParent(None)
             self.end_button.deleteLater()
@@ -1048,11 +933,7 @@ class VideoCallWindow(QWidget):
         """)
         self.end_button.clicked.connect(self.end_call)
         self.buttons_layout.addWidget(self.end_button)
-        
-        # Запускаем видео
-        if self.video_enabled and self.capture_thread:
-            self.capture_thread.start()
-    
+           
     def reject_call(self):
         """Отклонить видеозвонок"""
         self.call_rejected.emit(self.call_id)
@@ -1064,30 +945,21 @@ class VideoCallWindow(QWidget):
         self.video_socket_set = False
         
         if self.video_socket:
-            try:
-                self.video_socket.close()
-            except:
-                pass
-        
+            self.video_socket.close()            
+        self.audio_call.end_call()            # останавливает аудио
         self.call_ended.emit(self.call_id)
         self.close()
     
     def closeEvent(self, event):
-        """Обработка закрытия окна"""
         self.stop_video_capture()
         self.video_socket_set = False
-        
         if self.video_socket:
-            try:
-                self.video_socket.close()
-            except:
-                pass
-        
+            self.video_socket.close()
+        self.audio_call.end_call()
         if hasattr(self, 'receive_thread') and self.receive_thread:
             self.receive_thread.join(timeout=1.0)
-        
         event.accept()
-
+    
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
@@ -1097,11 +969,8 @@ class VideoCallWindow(QWidget):
         radius = max(rect.width(), rect.height()) // 2
         
         gradient = QRadialGradient(center, radius)
-        # Центр – полупрозрачный тёмный (можно настроить)
-        gradient.setColorAt(0, QColor(10, 10, 50, 150))
-        # Край – насыщенный тёмно-синий
+        gradient.setColorAt(0, QColor(10, 10, 50, 100))
         gradient.setColorAt(1, QColor(25, 25, 112, 255))
 
         painter.fillRect(rect, gradient)
-
         super().paintEvent(event)
