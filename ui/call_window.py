@@ -50,9 +50,8 @@ class CallWindow(QWidget):
         self.blocksize = 1024
         
         # Буфер для аудио данных
-        self.audio_buffer = []
-        self.buffer_size = 20
-        self.audio_buffer_lock = threading.Lock()
+        import queue
+        self.audio_buffer = queue.Queue(maxsize=20)
         
         # Счетчики для диагностики
         self.sent_packets = 0
@@ -67,6 +66,7 @@ class CallWindow(QWidget):
         
         # Флаги для отслеживания состояния
         self.audio_receiver_running = False
+        self.audio_receiver_thread = None
         self.local_mode = False
         self._closing_by_network = False  # Для предотвращения двойной отправки сигнала
         
@@ -915,23 +915,22 @@ class CallWindow(QWidget):
             return False
 
     def get_audio_data(self, frames):
-        """Получение аудио данных из буфера"""
         if not self.is_active:
             return None
         try:
-            with self.audio_buffer_lock:
-                if self.audio_buffer:
-                    data = self.audio_buffer.pop(0)
-                    if len(data) < frames:
-                        padded_data = np.zeros(frames, dtype=np.float32)
-                        padded_data[:len(data)] = data
-                        return padded_data
-                    return data[:frames]
+            # Неблокирующее получение
+            data = self.audio_buffer.get_nowait()
+            if len(data) < frames:
+                padded_data = np.zeros(frames, dtype=np.float32)
+                padded_data[:len(data)] = data
+                return padded_data
+            return data[:frames]
+        except queue.Empty:
             return None
         except Exception as e:
             logger.debug(f"Ошибка получения аудио данных: {e}")
             return None
-
+    
     def send_audio_data(self, audio_data):
         """Отправка аудио данных с проверкой соединения"""
         if self.muted:
@@ -989,17 +988,19 @@ class CallWindow(QWidget):
                     # Преобразуем байты в numpy array
                     audio_array = np.frombuffer(audio_data, dtype=np.float32)
                 
-                    # Добавляем в буфер с ограничением размера
-                    with self.audio_buffer_lock:
-                        if len(self.audio_buffer) < self.buffer_size:
-                            self.audio_buffer.append(audio_array)
-                        else:
-                            self.audio_buffer.pop(0)
-                            self.audio_buffer.append(audio_array)
- 
-            else:
-                logger.debug("🔊 Не могу принять аудио: нет сокета или поток не инициализирован или локальный режим")
-                       
+                    # Добавляем в буфер
+                    try:
+                        self.audio_buffer.put_nowait(audio_array)
+                    except queue.Full:
+                        # Если очередь переполнена, удаляем старый элемент и добавляем новый
+                        try:
+                            self.audio_buffer.get_nowait()
+                            self.audio_buffer.put_nowait(audio_array)
+                        except queue.Empty:
+                            pass
+                else:
+                    logger.debug("🔊 Не могу принять аудио: нет сокета или поток не инициализирован или локальный режим")
+                                        
         except socket.timeout:
             pass
         except Exception as e:
@@ -1014,9 +1015,10 @@ class CallWindow(QWidget):
         def audio_receiver():
             logger.info("Запуск приемника аудио данных")
             self.audio_receiver_running = True
-            while self.is_active and self.call_socket and not self.local_mode:
+            while self.is_active and self.call_socket and not self.local_mode and self.audio_receiver_running:
                 try:
                     self.receive_audio_data()
+                    time.sleep(0.01)  # небольшая пауза для снижения нагрузки
                 except Exception as e:
                     if self.is_active and not self.local_mode:
                         logger.debug(f"Ошибка в аудио приемнике: {e}")
@@ -1024,7 +1026,7 @@ class CallWindow(QWidget):
             self.audio_receiver_running = False
             logger.info("Приемник аудио данных остановлен")
 
-        self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=True)
+        self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=False)
         self.audio_receiver_thread.start()
 
     def stop_audio_streams(self):
@@ -1059,8 +1061,11 @@ class CallWindow(QWidget):
                     logger.debug(f"Ошибка остановки output stream: {e}")
                 self.output_stream = None
 
-            with self.audio_buffer_lock:
-                self.audio_buffer.clear()
+            while not self.audio_buffer.empty():
+                try:
+                    self.audio_buffer.get_nowait()
+                except queue.Empty:
+                    break
             
             # Очищаем локальный буфер если он есть
             if hasattr(self, 'local_audio_buffer'):
@@ -1108,9 +1113,14 @@ class CallWindow(QWidget):
         """Обработка закрытия окна"""
         try:
             self.is_active = False
+            self.audio_receiver_running = False   # сигнал остановки потока
             self.duration_timer.stop()
             self.socket_check_timer.stop()
             self.stop_audio_streams()
+
+            if self.audio_receiver_thread and self.audio_receiver_thread.is_alive():
+                self.audio_receiver_thread.join(timeout=0.5)  # ждём завершения
+
             if self.call_socket:  
                 try:  
                     self.call_socket.close()

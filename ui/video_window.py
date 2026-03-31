@@ -338,6 +338,8 @@ class VideoCallWindow(QWidget):
         self.audio_call.setVisible(False)          # не показываем окно
         
 
+
+
         # Перехватываем любые попытки показать окно и скрываем их
         self.audio_call.showEvent = lambda e: self.audio_call.hide()
             
@@ -354,10 +356,17 @@ class VideoCallWindow(QWidget):
         self.capture_thread = None
         self.video_processor = VideoProcessor()
         
+        import queue
+        self.remote_frame_queue = queue.Queue(maxsize=5)
+        
         # Сокеты для видео
         self.video_socket = None
         self.video_socket_set = False
-        
+        self.socket_check_timer = QTimer()
+        self.socket_check_timer.timeout.connect(self.check_video_socket)
+        self.socket_attempts = 0
+        self.max_socket_attempts = 5
+                
         # Буферы для видео
         self.local_frame = None
         self.remote_frame = None
@@ -366,6 +375,8 @@ class VideoCallWindow(QWidget):
         # UI
         self.init_ui()
         self.setup_video_capture()
+
+
         
     def init_ui(self):
         """Инициализация интерфейса"""
@@ -747,7 +758,13 @@ class VideoCallWindow(QWidget):
                     break
                 frame = self.receive_video_frame()
                 if frame is not None:
-                    self.remote_frame = frame
+                    try:
+                        # Если очередь переполнена, удаляем старый кадр
+                        if self.remote_frame_queue.full():
+                            self.remote_frame_queue.get_nowait()
+                        self.remote_frame_queue.put_nowait(frame)
+                    except queue.Full:
+                        pass
                 time.sleep(0.001)
         except OSError as e:
             if e.errno == 9:  # Bad file descriptor
@@ -761,14 +778,14 @@ class VideoCallWindow(QWidget):
     
     def update_ui(self):
         """Обновление UI"""
-        # Обновление локального видео
         if self.local_frame is not None:
             self.local_video_widget.update_frame(self.local_frame)
-        
-        # Обновление удаленного видео
-        if self.remote_frame is not None:
-            self.remote_video_widget.update_frame(self.remote_frame)
-        
+        try:
+            frame = self.remote_frame_queue.get_nowait()
+            if frame is not None:
+                self.remote_video_widget.update_frame(frame)
+        except queue.Empty:
+            pass        
         # Обновление статуса
         self.update_status()
     
@@ -855,6 +872,10 @@ class VideoCallWindow(QWidget):
         """Установка сокета для видео"""
         self.video_socket = socket
         self.video_socket_set = True
+        self.socket_attempts = 0
+        # Запускаем проверку готовности вместо прямого старта потока
+        self.socket_check_timer.start(500)  # проверка каждые 0.5 сек
+        return True
             
         # Запуск потока для приема видео
         self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
@@ -878,6 +899,24 @@ class VideoCallWindow(QWidget):
             result = False
         return result
     
+    def check_video_socket(self):
+        if not self.video_socket_set:
+            self.socket_check_timer.stop()
+            return
+        if self.video_socket and self.video_socket.fileno() != -1:
+            # Сокет готов
+            self.socket_check_timer.stop()
+            self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
+            self.receive_thread.start()
+            self.status_label.setText("🟢 Видео-соединение установлено")
+        else:
+            self.socket_attempts += 1
+            if self.socket_attempts >= self.max_socket_attempts:
+                self.socket_check_timer.stop()
+                self.status_label.setText("❌ Видео-сокет не готов")
+                logger.warning("Видео-сокет так и не стал готов")
+
+
     # Методы для совместимости с CallWindow
     @property
     def socket_set(self):

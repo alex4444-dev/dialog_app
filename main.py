@@ -10,7 +10,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),  # Вывод в консоль
-        logging.FileHandler('app_debug.log')  # И в файл
+        logging.FileHandler('./logs/app_debug.log')  # И в файл
     ]
 )
 

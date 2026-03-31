@@ -32,7 +32,7 @@ def setup_advanced_logging():
     
     # File handler с ротацией
     file_handler = logging.handlers.RotatingFileHandler(
-        'p2p_network.log', 
+        './logs/p2p_network.log', 
         maxBytes=10*1024*1024,  # 10MB
         backupCount=5
     )
@@ -83,6 +83,7 @@ class P2PNetworkClient(QObject):
         self.listener_socket = None
         self.peer_exchange_interval = 30  # секунды между обменами
         self.last_peer_exchange = 0
+        self.peers_lock = threading.Lock()
 
         self.media_ports = set()  # Для отслеживания используемых медиа-портов
         
@@ -633,74 +634,75 @@ class P2PNetworkClient(QObject):
             logger.error(f"Ошибка обработки обмена пирами: {e}")
     
     def _connect_to_peer(self, host: str, port: int):
-        """Подключение к указанному пиру с улучшенным логированием"""
+        """Подключение к указанному пиру с улучшенным логированием и блокировками"""
         try:
             peer_key = f"{host}:{port}"
-            
+
             logger.info(f"🔄 Попытка подключения к {host}:{port} (мой порт: {self.listen_port})")
-            
-            # Проверяем, не подключены ли уже
-            if peer_key in self.connected_peers:
-                logger.info(f"✅ Уже подключены к пиру {peer_key}")
-                return True
-            
-            # Проверяем, не пытаемся ли подключиться к себе
-            if host in ['localhost', '127.0.0.1'] and port == self.listen_port:
-                logger.debug(f"⚠️ Пропускаем подключение к себе {host}:{port}")
-                return False
-            
-            # Проверяем, не является ли это bootstrap узлом
-            if self._is_bootstrap_node(host, port):
-                logger.debug(f"⚠️ Пропускаем bootstrap узел {host}:{port}")
-                return False
-            
+
+            # Блокируем доступ к connected_peers для проверки
+            with self.peers_lock:
+                if peer_key in self.connected_peers:
+                    logger.info(f"✅ Уже подключены к пиру {peer_key}")
+                    return True
+
+                # Проверяем, не пытаемся ли подключиться к себе
+                if host in ['localhost', '127.0.0.1'] and port == self.listen_port:
+                    logger.debug(f"⚠️ Пропускаем подключение к себе {host}:{port}")
+                    return False
+
+                # Проверяем, не является ли это bootstrap узлом
+                if self._is_bootstrap_node(host, port):
+                    logger.debug(f"⚠️ Пропускаем bootstrap узел {host}:{port}")
+                    return False
+
             logger.info(f"🔗 Установка соединения с {host}:{port}")
-            
+
             peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             peer_socket.settimeout(10.0)
             peer_socket.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
-            
+
             try:
                 peer_socket.connect((host, port))
                 peer_socket.settimeout(30.0)
                 logger.info(f"✅ Успешное подключение к {host}:{port}")
-                
+
             except (socket.timeout, ConnectionRefusedError, OSError) as e:
                 logger.warning(f"❌ Не удалось подключиться к {host}:{port}: {e}")
                 peer_socket.close()
-                
-                # Помечаем пира как недоступного
+                # Помечаем пира как недоступного (вне блокировки)
                 self._mark_peer_unavailable(host, port)
                 return False
-        
-            # Успешное подключение
-            self.connected_peers[peer_key] = {
-                'socket': peer_socket,
-                'address': (host, port),
-                'connected_at': time.time(),
-                'last_seen': time.time(),
-                'username': None
-            }
-        
-            # Запускаем обработчик для этого пира
+
+            # Успешное подключение – добавляем в словарь под блокировкой
+            with self.peers_lock:
+                self.connected_peers[peer_key] = {
+                    'socket': peer_socket,
+                    'address': (host, port),
+                    'connected_at': time.time(),
+                    'last_seen': time.time(),
+                    'username': None
+                }
+
+            # Запускаем обработчик для этого пира (без блокировки)
             peer_thread = threading.Thread(
                 target=self._handle_client_connection,
                 args=(peer_socket, (host, port)),
                 daemon=True
             )
             peer_thread.start()
-            
+
             logger.info(f"🎉 Полностью подключено к пиру {host}:{port}")
-            
-            # Отправляем информацию о себе новому пиру
+
+            # Отправляем информацию о себе новому пиру (метод сам использует блокировку)
             self._send_self_info(peer_key)
-            
+
             return True
-        
+
         except Exception as e:
             logger.error(f"💥 Критическая ошибка подключения к {host}:{port}: {e}")
             return False
-
+    
     def _mark_peer_unavailable(self, host: str, port: int):
         """Пометить пира как недоступного"""
         try:
@@ -867,20 +869,27 @@ class P2PNetworkClient(QObject):
     def send_media_info(self, call_id: str, peer_username: str):
         """Отправить информацию о медиа-порте другому пиру"""
         try:
-            # Ищем пира по имени
             target_peer = None
             for peer_id, peer_info in list(self.connected_peers.items()):
                 if peer_info.get('username') == peer_username:
                     target_peer = peer_info
                     break
             if not target_peer:
-                logger.error(f"❌ Пир {peer_username} не найден для отправки media_info")
+                logger.error(f"❌ Пир {peer_username} не найден")
                 return False
-        
+            
+            # Получаем порт из уже существующего сокета
+            sock = self.media_sockets.get(call_id)
+            if not sock:
+                logger.error(f"❌ Сокет для звонка {call_id} не найден")
+                return False
+            
+            _, port = sock.getsockname()[:2]  # для серверного сокета
+            
             media_info = {
                 'type': 'media_info',
                 'call_id': call_id,
-                'media_port': 9100,  # фиксированный порт для звонков
+                'media_port': port,
                 'media_host': self.media_server_host,
                 'action': 'setup',
                 'timestamp': time.time()
@@ -889,75 +898,68 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"❌ Ошибка отправки media_info: {e}")
             return False
-
+    
     def _check_peer_connections(self):
-        """Проверка активности подключенных пиров с улучшенной логикой"""
+        """Проверка активности подключенных пиров"""
         current_time = time.time()
         disconnected_peers = []
-        
-        for peer_id, peer_info in list(self.connected_peers.items()):
+
+        # Копируем список пиров под блокировкой
+        with self.peers_lock:
+            peers_copy = list(self.connected_peers.items())
+
+        for peer_id, peer_info in peers_copy:
             peer_username = peer_info.get('username', 'unknown')
 
-            # Если пир не активен более 60 секунд, считаем его отключенным
             if current_time - peer_info.get('last_seen', 0) > 60:
-                logger.info(f"🔌 Пир {peer_username} ({peer_id}) отключен по таймауту активности")
+                logger.info(f"🔌 Пир {peer_username} ({peer_id}) отключен по таймауту")
                 disconnected_peers.append(peer_id)
             else:
-                # Отправляем ping для проверки соединения (только если не было активности 30+ секунд)
                 if current_time - peer_info.get('last_seen', 0) > 30:
                     try:
                         ping_data = {'type': 'ping', 'timestamp': current_time}
                         if not self._send_to_peer(peer_info, ping_data):
                             logger.info(f"🔌 Не удалось отправить ping пиру {peer_username} ({peer_id})")
                             disconnected_peers.append(peer_id)
-                        else:
-                            logger.debug(f"✅ Ping отправлен пиру {peer_username} ({peer_id})")
                     except Exception as e:
-                        logger.warning(f"🔌 Ошибка отправки ping пиру {peer_username} ({peer_id}): {e}")
+                        logger.warning(f"🔌 Ошибка ping пиру {peer_username}: {e}")
                         disconnected_peers.append(peer_id)
-        
-        # Закрываем соединения с отключенными пирами
+
         for peer_id in disconnected_peers:
             self._handle_peer_disconnection(peer_id)
 
     def _handle_peer_disconnection(self, peer_id: str):
         """Обработка отключения пира"""
-        try:
-            if peer_id in self.connected_peers:
-                peer_info = self.connected_peers[peer_id]
-                username = peer_info.get('username', 'unknown')
-                
-                # Закрываем сокет
-                try:
-                    peer_info['socket'].close()
-                except:
-                    pass
-                
-                # Удаляем из подключенных
-                del self.connected_peers[peer_id]
-                
-                # Помечаем сообщения для этого пользователя как недоставленные
-                self._mark_messages_undelivered(username)
-                
-                logger.info(f"🔌 Пир {username} ({peer_id}) полностью отключен")
-                
-                # ⭐ ДОБАВЛЕНО: Удаляем из known_peers, чтобы не пытаться переподключаться
-                host_port = peer_id.split(':')
-                if len(host_port) == 2:
-                    host, port = host_port
-                    port = int(port)
-                    self.known_peers = [
-                        p for p in self.known_peers 
-                        if not (p.get('host') == host and p.get('port') == port)
-                    ]
-                    
-                # Обновляем список пользователей
-                online_users = self.get_online_users()
-                self.user_list_updated.emit(online_users)
-                
-        except Exception as e:
-            logger.error(f"Ошибка обработки отключения пира {peer_id}: {e}")
+        with self.peers_lock:
+            if peer_id not in self.connected_peers:
+                return
+            peer_info = self.connected_peers[peer_id]
+            username = peer_info.get('username', 'unknown')
 
+            # Закрываем сокет (под блокировкой – безопасно)
+            try:
+                peer_info['socket'].close()
+            except:
+                pass
+
+            # Удаляем из подключенных
+            del self.connected_peers[peer_id]
+
+            # Удаляем из known_peers, чтобы не пытаться переподключаться
+            host_port = peer_id.split(':')
+            if len(host_port) == 2:
+                host, port = host_port
+                port = int(port)
+                self.known_peers = [
+                    p for p in self.known_peers
+                    if not (p.get('host') == host and p.get('port') == port)
+                ]
+
+        # Обновляем список пользователей (вне блокировки, чтобы не держать lock во время emit)
+        online_users = self.get_online_users()
+        self.user_list_updated.emit(online_users)
+        logger.info(f"🔌 Пир {username} ({peer_id}) полностью отключен")
+            
     def setup_video_connection(self, call_id: str, peer_username: str) -> socket.socket:
         """Настройка видео соединения"""
         try:
@@ -1120,82 +1122,89 @@ class P2PNetworkClient(QObject):
                 logger.error(f"❌ Пир {peer_username} не найден в подключенных")
                 return None
             
-            peer_host, peer_port = peer_info['address']
+            peer_host, _ = peer_info['address']
             
-            if is_outgoing:
-                # Для исходящего звонка создаем сокет и подключаемся
-                logger.info(f"🔧 Создание исходящего соединения к {peer_host}:{peer_port}")
+            if is_outgoing:                
                 return self._create_outgoing_call_socket(call_id, peer_host, peer_port)
             else:
-                # Для входящего звонка создаем серверный сокет и ждем подключения
-                logger.info(f"🔧 Создание входящего соединения, ожидание подключения...")
-                return self._create_incoming_call_socket(call_id, peer_host, peer_port)
-                
+                # Для входящего звонка: берём порт, который прислал собеседник
+                call_info = self.call_requests.get(call_id, {})
+                peer_port = call_info.get('peer_port')
+                if not peer_port:
+                    logger.error(f"❌ Не найден порт собеседника для звонка {call_id}")
+                    return None
+                return self._connect_to_peer_call(call_id, peer_host, peer_port)        
         except Exception as e:
             logger.error(f"❌ Ошибка настройки соединения для звонка: {e}")
             return None
 
     def _create_outgoing_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
         try:
-            logger.info(f"🔧 [_create_outgoing_call_socket] Звонок {call_id}: попытка подключения к {peer_host}:{peer_port}")
-            call_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            call_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            call_socket.bind(('0.0.0.0', 0))
-            local_port = call_socket.getsockname()[1]
-            logger.info(f"🔧 [_create_outgoing_call_socket] Звонок {call_id}: локальный порт {local_port}")
-            call_socket.settimeout(10.0)
-            call_socket.connect((peer_host, 9100))
-            logger.info(f"✅ [_create_outgoing_call_socket] Звонок {call_id}: подключение к {peer_host}:{peer_port} успешно")
-            call_socket.settimeout(30.0)
-            
-            # Отправка информации о звонке
-            call_info = {'type': 'call_connect', 'call_id': call_id, 'action': 'connect', 'from': self.username}
-            call_socket.send(json.dumps(call_info).encode())
-            
-            response = call_socket.recv(1024)
-            if response:
-                resp = json.loads(response.decode())
-                if resp.get('status') == 'connected':
-                    logger.info(f"✅ [_create_outgoing_call_socket] Звонок {call_id}: подтверждение получено")
-                    self.media_sockets[call_id] = call_socket
-                    return call_socket
-            logger.error(f"❌ [_create_outgoing_call_socket] Звонок {call_id}: нет подтверждения")
-            call_socket.close()
-            return None
+            # Получаем сохранённый локальный порт для этого звонка
+            call_info = self.call_requests.get(call_id)
+            if not call_info or 'local_port' not in call_info:
+                logger.error(f"❌ Нет информации о локальном порте для звонка {call_id}")
+                return None
+
+            local_port = call_info['local_port']
+            logger.info(f"🔧 [_create_outgoing_call_socket] Звонок {call_id}: создаём серверный сокет на порту {local_port}")
+
+            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            server_socket.bind(('0.0.0.0', local_port))
+            server_socket.listen(1)
+            server_socket.settimeout(30.0)
+
+            # Сохраняем серверный сокет в media_sockets
+            self.media_sockets[call_id] = server_socket
+
+            # Запускаем поток для ожидания подключения
+            threading.Thread(target=self._wait_for_call_connection, args=(call_id, server_socket), daemon=True).start()
+
+            return server_socket
+
         except Exception as e:
             logger.error(f"❌ [_create_outgoing_call_socket] Звонок {call_id}: ошибка: {e}")
             return None
 
-    def _create_incoming_call_socket(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
+    def _connect_to_peer_call(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
+        """Подключение к порту собеседника (используется для входящего звонка)"""
         try:
-            # Используем peer_port + 1 для входящего сокета
-            listen_port = 9100
-            logger.info(f"🔧 [_create_incoming_call_socket] Звонок {call_id}: создаём серверный сокет на порту {listen_port}")
-            server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            server_socket.bind(('0.0.0.0', listen_port))
-            server_socket.listen(1)
-            server_socket.settimeout(30.0)
-            logger.info(f"✅ [_create_incoming_call_socket] Звонок {call_id}: серверный сокет готов на порту {listen_port}")
-            self.media_sockets[call_id] = server_socket
-            # Запуск потока для accept
-            threading.Thread(target=self._wait_for_call_connection, args=(call_id, server_socket), daemon=True).start()
-            return server_socket
+            logger.info(f"🔧 [_connect_to_peer_call] Звонок {call_id}: подключение к {peer_host}:{peer_port}")
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            client_socket.settimeout(10.0)
+            client_socket.connect((peer_host, peer_port))
+            client_socket.settimeout(30.0)
+            
+            # Отправляем подтверждение
+            call_info = {'type': 'call_connect', 'call_id': call_id, 'action': 'connect', 'from': self.username}
+            client_socket.send(json.dumps(call_info).encode())
+            
+            # Ждём ответа
+            response = client_socket.recv(1024)
+            if response:
+                resp = json.loads(response.decode())
+                if resp.get('status') == 'connected':
+                    logger.info(f"✅ [_connect_to_peer_call] Звонок {call_id}: подключение установлено")
+                    return client_socket
+            
+            logger.error(f"❌ [_connect_to_peer_call] Звонок {call_id}: подтверждение не получено")
+            client_socket.close()
+            return None
         except Exception as e:
-            logger.error(f"❌ [_create_incoming_call_socket] Звонок {call_id}: ошибка: {e}")
+            logger.error(f"❌ [_connect_to_peer_call] Звонок {call_id}: ошибка: {e}")
             return None
 
     def _wait_for_call_connection(self, call_id: str, server_socket: socket.socket):
-        """Ожидание входящего подключения для звонка"""
+        """Ожидание входящего подключения для звонка (серверная сторона)"""
         try:
             logger.info(f"🔄 Ожидание подключения для звонка {call_id}...")
-            
             client_socket, client_addr = server_socket.accept()
             client_socket.settimeout(30.0)
-            
             logger.info(f"✅ Подключение для звонка {call_id} установлено от {client_addr}")
-            
-            # Получаем информацию о звонке
+
+            # Получаем информацию о звонке (ожидаем call_connect)
             data = client_socket.recv(1024)
             if data:
                 call_info = json.loads(data.decode())
@@ -1203,27 +1212,24 @@ class P2PNetworkClient(QObject):
                     # Отправляем подтверждение
                     response = {'status': 'connected', 'call_id': call_id}
                     client_socket.send(json.dumps(response).encode())
-                    
-                    # Обновляем сокет на клиентский
+                    # Заменяем серверный сокет на клиентский
                     self.media_sockets[call_id] = client_socket
-                    
                     # Закрываем серверный сокет
                     server_socket.close()
-                    
                     logger.info(f"✅ Соединение для звонка {call_id} полностью установлено")
                     return
-            
+
             logger.error(f"❌ Неверные данные подключения для звонка {call_id}")
             client_socket.close()
-        
+
         except socket.timeout:
             logger.error(f"❌ Таймаут ожидания подключения для звонка {call_id}")
         except Exception as e:
             logger.error(f"❌ Ошибка ожидания подключения: {e}")
         finally:
-            if call_id in self.media_sockets:
+            if call_id in self.media_sockets and self.media_sockets[call_id] == server_socket:
                 del self.media_sockets[call_id]
-
+    
     def get_call_socket(self, call_id: str) -> socket.socket:
         """Получение сокета для звонка"""
         try:
@@ -1282,70 +1288,63 @@ class P2PNetworkClient(QObject):
             logger.info(f"Очищено {initial_count - len(self.known_peers)} старых пиров")
     
     def _auto_connect_to_known_peers(self):
-        """Автоматическое подключение к известным пирам с улучшенной логикой"""
+        """Автоматическое подключение к известным пирам с потокобезопасной блокировкой"""
         try:
-            if not self.known_peers:
-                logger.debug("Нет известных пиров для автоматического подключения")
-                return
-                
-            current_time = time.time()
-            connected_count = len(self.connected_peers)
-            
-            logger.info(f"🔄 Автоматическое подключение: {len(self.known_peers)} известных пиров, {connected_count} уже подключено")
-            
-            # Подключаемся к самым свежим пирам сначала
-            sorted_peers = sorted(
-                self.known_peers, 
-                key=lambda x: x.get('discovered_at', 0), 
-                reverse=True
-            )
-        
-            for peer in sorted_peers:
-                try:
+            # 1. Блокируем доступ к known_peers и connected_peers на короткое время,
+            #    чтобы получить снимок списка пиров, к которым нужно попытаться подключиться.
+            with self.peers_lock:
+                if not self.known_peers:
+                    logger.debug("Нет известных пиров для автоматического подключения")
+                    return
+
+                # Сортируем пиры по свежести (более новые – первыми)
+                sorted_peers = sorted(
+                    self.known_peers,
+                    key=lambda x: x.get('discovered_at', 0),
+                    reverse=True
+                )
+
+                # Берём копию списка, чтобы не держать блокировку во время самих подключений
+                peers_to_try = []
+                for peer in sorted_peers:
                     host = peer.get('host')
                     port = peer.get('port')
-                    
                     if not host or not port:
                         continue
-                        
-                    # Пропускаем себя
+                    # Пропускаем себя и bootstrap узлы
                     if host in ['localhost', '127.0.0.1'] and port == self.listen_port:
                         continue
-                    
-                    # Пропускаем bootstrap узлы
                     if self._is_bootstrap_node(host, port):
                         continue
-                    
                     peer_key = f"{host}:{port}"
-                
-                    # Если уже подключены, пропускаем
+                    # Если уже подключены – пропускаем
                     if peer_key in self.connected_peers:
                         continue
-                    
-                    # Проверяем, не пытались ли подключиться недавно
+                    # Проверяем, не пытались ли подключиться недавно (не чаще раза в минуту)
+                    current_time = time.time()
                     last_attempt = peer.get('last_connect_attempt', 0)
-                    if current_time - last_attempt < 60:  # Не чаще чем раз в минуту
+                    if current_time - last_attempt < 60:
                         continue
-                    
-                    # Обновляем время последней попытки
+                    # Обновляем время последней попытки прямо в known_peers (под блокировкой)
                     peer['last_connect_attempt'] = current_time
-                    
-                    logger.info(f"🔄 Автоматическое подключение к пиру {host}:{port}")
-                    
-                    # Запускаем подключение (не в отдельном потоке, чтобы не перегружать)
-                    if self._connect_to_peer(host, port):
-                        connected_count += 1
-                    
-                    # Ограничиваем количество одновременных попыток
-                    if connected_count >= 3:
-                        break
-                        
-                except Exception as e:
-                    logger.debug(f"Ошибка автоматического подключения к пиру {peer}: {e}")
-                    
+                    peers_to_try.append((host, port))
+
+            # 2. Вне блокировки выполняем фактические подключения (это может быть долго)
+            connected_count = 0
+            for host, port in peers_to_try:
+                logger.info(f"🔄 Автоматическое подключение к пиру {host}:{port}")
+                if self._connect_to_peer(host, port):
+                    connected_count += 1
+                # Ограничиваем количество одновременных попыток (не более 3 за один цикл)
+                if connected_count >= 3:
+                    break
+
+            if connected_count:
+                logger.info(f"✅ Автоматически подключено к {connected_count} пирам")
+
         except Exception as e:
             logger.error(f"Ошибка автоматического подключения: {e}")
-
+        
     def _process_received_data(self, data: dict, peer_id: str):
         """Обработка полученных данных с поддержкой обмена пирами"""
         message_type = data.get('type')
@@ -1849,50 +1848,68 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.debug(f"Ошибка получения данных: {e}")
             return None
-    
+
     def get_online_users(self) -> List[Dict]:
-        """Получение списка онлайн пользователей с улучшенным логированием"""
+        """Получение списка онлайн пользователей с потокобезопасной блокировкой"""
         try:
             online_users = []
-            seen_usernames = set()  # Для отслеживания уникальных имен
+            seen_usernames = set()  # Для отслеживания уникальных имён
 
-            # Пользователи из подключенных пиров
-            for peer_id, peer_info in list(self.connected_peers.items()):
-                try:
-                    username = peer_info.get('username')
-                    if username and username not in seen_usernames:
-                        seen_usernames.add(username)
-                        
-                        user_data = {
-                            'username': username,
-                            'host': peer_info['address'][0],
-                            'port': peer_info['address'][1],
-                            'status': 'connected',
-                            'last_seen': peer_info.get('last_seen', time.time()),
-                            'peer_id': peer_id
-                        }
-                        online_users.append(user_data)
-                        logger.debug(f"📋 Добавлен в онлайн: {username} ({peer_id})")
-                except Exception as e:
-                    logger.error(f"❌ Ошибка обработки пира {peer_id}: {e}")
+            # Блокируем доступ к connected_peers на время чтения
+            with self.peers_lock:
+                # Итерируем по копии списка ключей, чтобы избежать изменения словаря во время итерации
+                for peer_id, peer_info in list(self.connected_peers.items()):
+                    try:
+                        username = peer_info.get('username')
+                        if username and username not in seen_usernames:
+                            seen_usernames.add(username)
+
+                            user_data = {
+                                'username': username,
+                                'host': peer_info['address'][0],
+                                'port': peer_info['address'][1],
+                                'status': 'connected',
+                                'last_seen': peer_info.get('last_seen', time.time()),
+                                'peer_id': peer_id
+                            }
+                            online_users.append(user_data)
+                            logger.debug(f"📋 Добавлен в онлайн: {username} ({peer_id})")
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка обработки пира {peer_id}: {e}")
 
             logger.debug(f"📊 get_online_users: {len(online_users)} уникальных пользователей онлайн")
             return online_users
-        
+
         except Exception as e:
             logger.error(f"💥 Критическая ошибка в get_online_users: {e}")
-            return []  
+            return []
 
+    
     # Звонки
     def send_call_request(self, to_username: str, call_type: str) -> str:
         """Отправка запроса на звонок"""
         try:
             call_id = str(uuid.uuid4())
 
+            # Выделяем порт для этого звонка (серверный)
+            local_port = self._find_free_call_port()
+            if not local_port:
+                logger.error(f"❌ Не удалось выделить порт для звонка {call_id}")
+                return None
+
+            # Сохраняем информацию о нашем порте
+            self.call_requests[call_id] = {
+                'to_user': to_username,
+                'call_type': call_type,
+                'status': 'outgoing',
+                'timestamp': time.time(),
+                'local_port': local_port   
+            }
+
             # Добавляем информацию о медиа-сервере
             media_info = {
                 'media_server': self.media_server_host,  
-                'media_port': 9100,
+                'media_port': local_port,
                 'call_id': call_id
             }
 
@@ -1917,7 +1934,8 @@ class P2PNetworkClient(QObject):
     
             if target_peer:
                 if self._send_to_peer(target_peer, message):
-                    logger.info(f"📞 Отправлен запрос на звонок {call_id} пользователю {to_username}")
+                    logger.info(f"📞 Отправлен запрос на звонок {call_id} пользователю {to_username}, порт {local_port}")
+                    
                     
                     self.call_requests[call_id] = {
                         'to_user': to_username,
@@ -1980,6 +1998,7 @@ class P2PNetworkClient(QObject):
                     'from_user': from_user,
                     'call_type': call_type,
                     'media_info': media_info,
+                    'peer_port': media_info.get('media_port'),
                     'status': 'incoming',
                     'timestamp': time.time()
                 }

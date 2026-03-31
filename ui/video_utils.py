@@ -44,7 +44,6 @@ class VideoCompressor:
             frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
             
             if frame is not None:
-                # Конвертация цвета
                 frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 return frame
             return None
