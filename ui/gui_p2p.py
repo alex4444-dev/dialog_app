@@ -645,6 +645,10 @@ class P2PMainWindow(QMainWindow):
             else:
                 self.handle_incoming_call_request(from_user, call_type, call_id)
                 
+        elif action == 'outgoing_call':
+            # Ничего не делаем, окно уже создано в start_video_call
+            logger.debug(f"Игнорируем outgoing_call для {call_id}")
+                
         elif action == 'call_accepted':
             self.handle_call_accepted(from_user, call_id)
             
@@ -1775,6 +1779,19 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"=== ОБРАБОТКА ВХОДЯЩЕГО ВИДЕОЗВОНКА {call_id} ОТ {from_user} ===")
             
+            # Получаем информацию о звонке из P2P клиента
+            call_info = self.p2p_client.call_requests.get(call_id, {})
+            video_port = call_info.get('video_port')
+            media_host = call_info.get('media_host')
+            
+            if not video_port or not media_host:
+                logger.error(f"❌ Не хватает данных для видео: video_port={video_port}, media_host={media_host}")
+                # Можно попробовать получить адрес пира из connected_peers
+                for peer_id, pinfo in self.p2p_client.connected_peers.items():
+                    if pinfo.get('username') == from_user:
+                        media_host = pinfo['address'][0]
+                        break
+            
             # Чтение настроек видео
             settings = QSettings('DialogApp', 'P2PClient')
             camera_index = settings.value('video_camera_index', 0, type=int)
@@ -1784,11 +1801,6 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
                     
-            
-            if call_id in self.active_calls:
-                logger.warning(f"Дублирующий видеозвонок {call_id}, игнорируем")
-                return
-
             
 
             # Создаем окно видеозвонка
@@ -1805,17 +1817,19 @@ class P2PMainWindow(QMainWindow):
             video_window.call_rejected.connect(self.reject_call)
             
             
-            # Получаем сокет для видео(входящий)
-            if self.p2p_client:
-                logger.info(f"🔧 Настройка видео-соединения для входящего звонка {call_id}")
-                
-                # Создаем видео сокет
-                video_socket = self.p2p_client.setup_video_connection(call_id, from_user)
-                
-                if video_socket:
-                    logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
+            # Создаём клиентский сокет для видео и подключаемся к порту собеседника
+            if video_port and media_host:
+                try:
+                    video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    video_socket.settimeout(10.0)
+                    video_socket.connect((media_host, video_port))
+                    video_socket.settimeout(30.0)
                     video_window.set_video_socket(video_socket)
-            
+                    logger.info(f"✅ Видео-сокет подключён к {media_host}:{video_port}")
+                except Exception as e:
+                    logger.error(f"❌ Не удалось подключиться к видео-порту {media_host}:{video_port}: {e}")
+                
+
             # Аудио‑сокет (входящий)
             audio_socket = self.p2p_client.setup_call_connection(call_id, from_user, is_outgoing=False)
             if audio_socket:
@@ -1853,6 +1867,15 @@ class P2PMainWindow(QMainWindow):
 
     def start_video_call(self, username):
         """Начать видеозвонок с пользователем"""
+        # Отладочная информация
+        online_users = self.p2p_client.get_online_users()
+        logger.info(f"Онлайн пользователи перед видеозвонком: {[u['username'] for u in online_users]}")
+    
+        # Проверим, есть ли пользователь
+        if not any(u['username'] == username for u in online_users):
+            QMessageBox.warning(self, 'Ошибка', f'Пользователь {username} не в сети')
+            return
+
         if not self.p2p_client:
             QMessageBox.warning(self, 'Ошибка', 'P2P клиент не инициализирован')
             return
@@ -1882,6 +1905,7 @@ class P2PMainWindow(QMainWindow):
                                                 input_device=self.audio_input_device, 
                                                 output_device=self.audio_output_device)
         video_window.call_ended.connect(self.end_call)
+        
         
         # Получаем сокет для видео
         video_socket = self.p2p_client.setup_video_connection(call_id, username)

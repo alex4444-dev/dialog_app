@@ -42,6 +42,7 @@ class CallWindow(QWidget):
         self.call_ended_emitted = False
         self.accept_button_clicked = False
         self.muted = False
+        self.send_audio_active = True
         
         # Аудио параметры
         self.sample_rate = 44100
@@ -323,32 +324,22 @@ class CallWindow(QWidget):
         """Включение/выключение микрофона"""
         self.muted = not self.muted
         if self.muted:
-            self.mute_button.setText("🔇 Микрофон выкл")
-            self.mute_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e67e22;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: #d35400; }
-            """)
+            logger.info("🔇 Микрофон выключен")
+            if hasattr(self, 'status_label'):
+                self.mute_button.setText("🔇 Микрофон выкл")
         else:
-            self.mute_button.setText("🔊 Микрофон вкл")
-            self.mute_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #3498db;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                }
-                QPushButton:hover { background-color: #2980b9; }
-            """)
-        logger.info(f"Микрофон {'отключен' if self.muted else 'включен'}")
+            logger.info("🎤 Микрофон включён")
+            if hasattr(self, 'status_label'):
+                self.mute_button.setText("🔊 Микрофон вкл")
+            
+        
+
+    def audio_input_callback(self, indata, frames, time, status):
+        if status:
+            logger.warning(f"Статус аудио: {status}")
+        if not self.muted:          # если микрофон не заглушён
+            # отправляем данные
+            self.send_audio_data(indata)
 
     def set_call_socket(self, call_socket):
         """Установка сокета для звонка"""

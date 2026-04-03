@@ -330,6 +330,7 @@ class VideoCallWindow(QWidget):
         self.username = username
         self.call_id = call_id
         self.is_outgoing = is_outgoing
+        self._is_closing = False
 
         # Создаем аудиопоток для звука
         from call_window import CallWindow
@@ -338,7 +339,7 @@ class VideoCallWindow(QWidget):
         self.audio_call.setVisible(False)          # не показываем окно
         
 
-
+        
 
         # Перехватываем любые попытки показать окно и скрываем их
         self.audio_call.showEvent = lambda e: self.audio_call.hide()
@@ -369,7 +370,6 @@ class VideoCallWindow(QWidget):
                 
         # Буферы для видео
         self.local_frame = None
-        self.remote_frame = None
         self.display_timer = QTimer()
         
         # UI
@@ -388,6 +388,7 @@ class VideoCallWindow(QWidget):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
         
+
         self.setStyleSheet("""
             QGroupBox {
                 background-color: transparent;
@@ -494,6 +495,27 @@ class VideoCallWindow(QWidget):
         """)
         self.video_toggle_button.clicked.connect(self.toggle_video)
         control_layout.addWidget(self.video_toggle_button)
+        
+        # Кнопка отключения микрофона
+        self.mute_button = QPushButton("🔇 Выключить микрофон")
+        self.mute_button.setFixedHeight(40)
+        self.mute_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e67e22;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 13px;
+            }
+            QPushButton:hover {
+                background-color: #d35400;
+            }
+        """)
+        self.mute_button.clicked.connect(self.toggle_mute)
+        control_layout.addWidget(self.mute_button)
+        
         
         # Кнопка настроек видео
         self.settings_button = QPushButton("⚙️ Настройки видео")
@@ -678,6 +700,9 @@ class VideoCallWindow(QWidget):
         try:
             if frame is None:
                 return
+            if not self.video_socket or self.video_socket.fileno() == -1 or not self.is_socket_connected(self.video_socket):
+                logger.warning("Сокет не подключён, отправка невозможна")
+                return
             
             # Конвертируем BGR в RGB для лучшей цветопередачи
             if len(frame.shape) == 3 and frame.shape[2] == 3:
@@ -709,7 +734,7 @@ class VideoCallWindow(QWidget):
     def receive_video_frame(self):
         """Прием кадра видео"""
         try:
-            if not self.video_socket or self.video_socket.fileno() == -1:
+            if not self.video_socket or self.video_socket.fileno() == -1 or not self.is_socket_connected(self.video_socket):
                 return None
             # Чтение заголовка
             header = self.video_socket.recv(12)  # 3 int по 4 байта
@@ -738,7 +763,9 @@ class VideoCallWindow(QWidget):
             
             return None
         except OSError as e:
-            if e.errno == 9:
+            if e.errno == 107:  # ENOTCONN
+                logger.warning("Сокет не подключён при приёме видео")
+            elif e.errno == 9:
                 logger.warning("Сокет закрыт при приёме кадра")
             else:
                 logger.error(f"Ошибка приёма видео: {e}")
@@ -750,10 +777,12 @@ class VideoCallWindow(QWidget):
     
     def receive_video_loop(self):
         """Цикл приема видео"""
+        logger.info("🟢 Поток приёма видео запущен")
+        frame_count = 0
         try:
             while self.video_socket_set and self.video_socket:
                 # Проверяем, не закрыт ли сокет
-                if self.video_socket.fileno() == -1:
+                if self.video_socket.fileno() == -1 or not self.is_socket_connected(self.video_socket):
                     logger.warning("Видео-сокет закрыт, выходим из цикла приёма")
                     break
                 frame = self.receive_video_frame()
@@ -766,6 +795,7 @@ class VideoCallWindow(QWidget):
                     except queue.Full:
                         pass
                 time.sleep(0.001)
+            self.video_socket_set = False
         except OSError as e:
             if e.errno == 9:  # Bad file descriptor
                 logger.warning("Видео-сокет был закрыт во время приёма")
@@ -797,7 +827,7 @@ class VideoCallWindow(QWidget):
         elif not self.video_socket_set:
             self.status_label.setText("🟡 Ожидание видео-соединения...")
             self.status_label.setStyleSheet("font-size: 16px; color: #f39c12;")
-        elif self.local_frame is not None and self.remote_frame is not None:
+        elif self.local_frame is not None and self.remote_frame_queue.qsize() > 0:
             self.status_label.setText("🟢 Видеозвонок активен")
             self.status_label.setStyleSheet("font-size: 16px; color: #27ae60;")
         elif self.local_frame is not None:
@@ -821,6 +851,45 @@ class VideoCallWindow(QWidget):
         
         self.video_toggled.emit(self.video_enabled)
     
+    def toggle_mute(self):
+        """Включить/выключить микрофон в скрытом аудио-окне"""
+        if hasattr(self.audio_call, 'toggle_mute'):
+            self.audio_call.toggle_mute()
+            if self.audio_call.muted:
+                self.mute_button.setText("🔊 Включить микрофон")
+                self.mute_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #95a5a6;
+                        color: white;
+                        border: none;
+                        padding: 8px 16px;
+                        border-radius: 5px;
+                        font-weight: bold;
+                        font-size: 13px;
+                    }
+                    QPushButton:hover {
+                        background-color: #7f8c8d;
+                    }
+                """)
+            else:
+                self.mute_button.setText("🔇 Выключить микрофон")
+                self.mute_button.setStyleSheet("""
+                    QPushButton {
+                        background-color: #e67e22;
+                        color: white;
+                        border: none;
+                        padding: 8px 16px;
+                        border-radius: 5px;
+                        font-weight: bold;
+                        font-size: 13px;
+                    }
+                    QPushButton:hover {
+                        background-color: #d35400;
+                    }
+                """)
+        else:
+            logger.warning("Метод toggle_mute не найден в audio_call")
+
     def stop_video_capture(self):
         """Остановка захвата видео"""
         if self.capture_thread:
@@ -868,22 +937,43 @@ class VideoCallWindow(QWidget):
         dlg.settings_changed.connect(on_video_settings_changed)
         dlg.exec_()
     
+    def is_socket_connected(self, sock):
+        try:
+            # getpeername() выбрасывает исключение, если сокет не подключён
+            sock.getpeername()
+            return True
+        except:
+            return False
+
     def set_video_socket(self, socket):
         """Установка сокета для видео"""
         self.video_socket = socket
         self.video_socket_set = True
         self.socket_attempts = 0
-        # Запускаем проверку готовности вместо прямого старта потока
-        self.socket_check_timer.start(500)  # проверка каждые 0.5 сек
+        # Проверяем состояние сразу
+        self.check_video_socket()
         return True
-            
-        # Запуск потока для приема видео
-        self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
-        self.receive_thread.start()
-            
-        self.status_label.setText("🟢 Видео-соединение установлено")
-        return True
-            
+
+
+    def check_video_socket(self):
+        if not self.video_socket_set:
+            return
+        if self.video_socket and self.video_socket.fileno() != -1 and self.is_socket_connected(self.video_socket):
+            # Сокет подключён – запускаем поток приёма
+            self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
+            self.receive_thread.start()
+            self.status_label.setText("🟢 Видео-соединение установлено")
+            self.socket_check_timer.stop()
+        else:
+            self.socket_attempts += 1
+            if self.socket_attempts >= self.max_socket_attempts:
+                self.socket_check_timer.stop()
+                self.status_label.setText("❌ Видео-сокет не готов или не подключён")
+                logger.warning("Видео-сокет так и не стал подключённым")
+            else:
+                # Повторим проверку через 0.5 сек
+                self.socket_check_timer.start(500)
+
     def set_audio_socket(self, socket):
         """Установить аудио-сокет в скрытое окно"""
         result = False
@@ -899,24 +989,7 @@ class VideoCallWindow(QWidget):
             result = False
         return result
     
-    def check_video_socket(self):
-        if not self.video_socket_set:
-            self.socket_check_timer.stop()
-            return
-        if self.video_socket and self.video_socket.fileno() != -1:
-            # Сокет готов
-            self.socket_check_timer.stop()
-            self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
-            self.receive_thread.start()
-            self.status_label.setText("🟢 Видео-соединение установлено")
-        else:
-            self.socket_attempts += 1
-            if self.socket_attempts >= self.max_socket_attempts:
-                self.socket_check_timer.stop()
-                self.status_label.setText("❌ Видео-сокет не готов")
-                logger.warning("Видео-сокет так и не стал готов")
-
-
+    
     # Методы для совместимости с CallWindow
     @property
     def socket_set(self):
@@ -931,6 +1004,8 @@ class VideoCallWindow(QWidget):
 
     def start_call(self):
         """Начать видеозвонок после получения подтверждения"""
+        if self._is_closing:
+            return
         logger.info("🎥 Запуск видеозвонка")
         if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
             self.capture_thread.start()
@@ -943,7 +1018,8 @@ class VideoCallWindow(QWidget):
         """Принять видеозвонок"""
         self.call_accepted.emit(self.call_id)
         self.status_label.setText("✅ Видеозвонок принят")
-        
+        self.start_call()
+
         # Прячем кнопки принятия/отклонения
         self.accept_button.setVisible(False)
         self.reject_button.setVisible(False)
@@ -980,16 +1056,25 @@ class VideoCallWindow(QWidget):
     
     def end_call(self):
         """Завершить видеозвонок"""
+        if self._is_closing:
+            return
+        self._is_closing = True
         self.stop_video_capture()
         self.video_socket_set = False
-        
         if self.video_socket:
-            self.video_socket.close()            
-        self.audio_call.end_call()            # останавливает аудио
+            try:
+                self.video_socket.close()
+            except:
+                pass
+        self.audio_call.end_call()
         self.call_ended.emit(self.call_id)
         self.close()
     
     def closeEvent(self, event):
+        if self._is_closing:
+            event.accept()
+            return
+        self._is_closing = True
         self.stop_video_capture()
         self.video_socket_set = False
         if self.video_socket:
@@ -1000,10 +1085,11 @@ class VideoCallWindow(QWidget):
         event.accept()
     
     def paintEvent(self, event):
+        super().paintEvent(event)
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self.rect()
-
+   
         center = rect.center()
         radius = max(rect.width(), rect.height()) // 2
         
@@ -1012,4 +1098,4 @@ class VideoCallWindow(QWidget):
         gradient.setColorAt(1, QColor(25, 25, 112, 255))
 
         painter.fillRect(rect, gradient)
-        super().paintEvent(event)
+        

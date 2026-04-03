@@ -47,20 +47,22 @@ def setup_advanced_logging():
 # Инициализация логирования
 logger = setup_advanced_logging()
 
-
-def find_free_port(start_port=8888, max_attempts=50):
-        """Находит свободный порт в диапазоне"""
-        for attempt in range(max_attempts):
-            port = start_port + attempt
+def _find_free_call_port(self):
+    """Найти свободный порт для звонка (аудио/видео)"""
+    if not hasattr(self, 'media_ports'):
+        self.media_ports = set()
+    for port in range(9100, 9500):
+        if port not in self.media_ports:
             try:
-                # Пробуем создать временный сокет для проверки порта
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                     s.bind(('0.0.0.0', port))
+                    self.media_ports.add(port)
                     return port
             except OSError:
                 continue
-                return None  # Не нашли свободный порт
+    logger.error("❌ Не найден свободный порт в диапазоне 9100-9500")
+    return None
 
 
 class P2PNetworkClient(QObject):
@@ -330,16 +332,15 @@ class P2PNetworkClient(QObject):
             logger.warning(f"❌ Не удалось зарегистрироваться в bootstrap сервере: {e}")
 
     def set_username(self, username: str):
-        """Установка имени пользователя для P2P сети"""
+        """Установка имени пользователя (вызывается после логина)"""
         self.username = username
-        logger.info(f"P2P сеть: установлено имя пользователя '{username}'")
-    
-        # Отправляем информацию о себе всем подключенным пирам
+        logger.info(f"Установлено имя пользователя: {username}")
+  
+    def broadcast_self_info(self):
+        """Разослать информацию о себе всем подключённым пирам"""
         for peer_id in list(self.connected_peers.keys()):
             self._send_self_info(peer_id)
-   
 
-    
     def _send_self_info(self, peer_id: str):
         """Отправка информации о себе пиру"""
         try:
@@ -362,15 +363,50 @@ class P2PNetworkClient(QObject):
     def _handle_user_online(self, data: dict, peer_id: str):
         """Обработка уведомления о входе пользователя"""
         username = data.get('username')
-        if username and peer_id in self.connected_peers:
-            self.connected_peers[peer_id]['username'] = username
-            self.connected_peers[peer_id]['last_seen'] = time.time()
-        
-            logger.info(f"Пользователь {username} в сети (пир {peer_id})")
-        
-            # Обновляем список пользователей в GUI
-            online_users = self.get_online_users()
-            self.user_list_updated.emit(online_users)
+        if not username or peer_id not in self.connected_peers:
+            return
+
+        # Получаем постоянный порт пира из сообщения
+        listen_port = data.get('listen_port')
+        if listen_port:
+            host = peer_id.split(':')[0]
+            new_peer_id = f"{host}:{listen_port}"
+            if new_peer_id != peer_id:
+                if new_peer_id in self.connected_peers:
+                    # Уже есть запись с таким ключом – удаляем текущую временную
+                    logger.debug(f"Удаляем временную запись {peer_id}, используем {new_peer_id}")
+                    del self.connected_peers[peer_id]
+                    peer_id = new_peer_id
+                else:
+                    # Переименовываем ключ
+                    self.connected_peers[new_peer_id] = self.connected_peers.pop(peer_id)
+                    peer_id = new_peer_id
+
+        # Проверка дубликатов
+        existing_peer = None
+        for pid, pinfo in list(self.connected_peers.items()):
+            if pinfo.get('username') == username and pid != peer_id:
+                existing_peer = pid
+                break
+
+        if existing_peer:
+            logger.warning(f"⚠️ Обнаружен дубликат пользователя {username}: {existing_peer} и {peer_id}")
+            try:
+                self.connected_peers[existing_peer]['socket'].close()
+            except:
+                pass
+            del self.connected_peers[existing_peer]
+
+        self.connected_peers[peer_id]['username'] = username
+        self.connected_peers[peer_id]['last_seen'] = time.time()
+
+        logger.info(f"👤 Пользователь {username} в сети (пир {peer_id})")
+
+        # Обновляем список пользователей в GUI
+        online_users = self.get_online_users()
+        self.user_list_updated.emit(online_users)
+        logger.info(f"📊 Обновлен список пользователей: {len(online_users)} пользователей онлайн")
+
 
     def get_peers_from_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
         """Синхронное получение списка пиров от bootstrap сервера"""
@@ -732,7 +768,8 @@ class P2PNetworkClient(QObject):
                 'type': 'user_online',
                 'username': self.username,
                 'timestamp': time.time(),
-                'client_version': '1.0.0'
+                'client_version': '1.0.0',
+                'listen_port': self.listen_port
             }
             
             self._send_to_peer(self.connected_peers[peer_id], self_info)
@@ -1107,33 +1144,30 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Ошибка обработки видео информации: {e}")
 
     def setup_call_connection(self, call_id: str, peer_username: str, is_outgoing: bool) -> socket.socket:
-        """Настройка соединения для звонка - создает и возвращает готовый сокет"""
         try:
             logger.info(f"🔊 Настройка соединения для звонка {call_id} (исходящий: {is_outgoing})")
-            
-            # Ищем информацию о пире
+
             peer_info = None
             for pid, p_info in list(self.connected_peers.items()):
                 if p_info.get('username') == peer_username:
                     peer_info = p_info
                     break
-        
+
             if not peer_info:
                 logger.error(f"❌ Пир {peer_username} не найден в подключенных")
                 return None
-            
-            peer_host, _ = peer_info['address']
-            
-            if is_outgoing:                
-                return self._create_outgoing_call_socket(call_id, peer_host, peer_port)
+
+            peer_host, peer_port = peer_info['address']   # получаем порт пира
+
+            if is_outgoing:
+                return self._create_outgoing_call_socket(call_id, peer_host, peer_port)  # передаём порт
             else:
-                # Для входящего звонка: берём порт, который прислал собеседник
                 call_info = self.call_requests.get(call_id, {})
                 peer_port = call_info.get('peer_port')
                 if not peer_port:
                     logger.error(f"❌ Не найден порт собеседника для звонка {call_id}")
                     return None
-                return self._connect_to_peer_call(call_id, peer_host, peer_port)        
+                return self._connect_to_peer_call(call_id, peer_host, peer_port)
         except Exception as e:
             logger.error(f"❌ Ошибка настройки соединения для звонка: {e}")
             return None
@@ -1710,6 +1744,16 @@ class P2PNetworkClient(QObject):
         if self._is_bootstrap_node(address[0], address[1]):
             logger.info(f"⚠️ Входящее соединение от bootstrap узла {address} - обрабатываем временно")
         
+        
+        # ========== ДОБАВЛЯЕМ ОТПРАВКУ СВОЕГО ИМЕНИ ==========
+        # Отправляем информацию о себе сразу после добавления пира
+        # (пир уже добавлен в connected_peers при вызове accept_connections)
+        # Но так как входящее соединение уже добавлено в connected_peers в _accept_connections,
+        # мы можем просто отправить self_info.
+        if peer_id in self.connected_peers:
+            self._send_self_info(peer_id)
+        # ====================================================
+            
         try:
             buffer = b""
             while self.is_running:
@@ -1887,34 +1931,57 @@ class P2PNetworkClient(QObject):
     
     # Звонки
     def send_call_request(self, to_username: str, call_type: str) -> str:
-        """Отправка запроса на звонок"""
+        """Отправка запроса на звонок (аудио или видео)"""
         try:
             call_id = str(uuid.uuid4())
 
-            # Выделяем порт для этого звонка (серверный)
+            # 1. Найти свободный порт для аудио
             local_port = self._find_free_call_port()
             if not local_port:
                 logger.error(f"❌ Не удалось выделить порт для звонка {call_id}")
                 return None
 
-            # Сохраняем информацию о нашем порте
-            self.call_requests[call_id] = {
-                'to_user': to_username,
-                'call_type': call_type,
-                'status': 'outgoing',
-                'timestamp': time.time(),
-                'local_port': local_port   
-            }
-
-            # Добавляем информацию о медиа-сервере
             media_info = {
-                'media_server': self.media_server_host,  
+                'media_server': self._get_local_ip(),
                 'media_port': local_port,
                 'call_id': call_id
             }
 
-            
-            # Добавляем информацию о медиа-сервере в сообщение
+            # 2. Если видеозвонок – найти свободный порт для видео
+            video_port = None
+            if call_type == 'video':
+                video_port = self._find_free_call_port()
+                if video_port:
+                    media_info['video_port'] = video_port
+                    logger.info(f"📹 Выделен видео-порт {video_port} для звонка {call_id}")
+                else:
+                    logger.warning(f"⚠️ Не удалось выделить видео-порт для звонка {call_id}, видеопоток не будет работать")
+
+            # 3. Сохраняем информацию о звонке (после того как все порты определены)
+            call_info = {
+                'to_user': to_username,
+                'call_type': call_type,
+                'status': 'outgoing',
+                'timestamp': time.time(),
+                'local_port': local_port
+            }
+            if video_port:
+                call_info['video_local_port'] = video_port
+            self.call_requests[call_id] = call_info
+
+            # 4. Найти пира по имени
+            target_peer = None
+            for peer_id, peer_info in list(self.connected_peers.items()):
+                if peer_info.get('username') == to_username:
+                    target_peer = peer_info
+                    break
+
+            if not target_peer:
+                available = [p.get('username') for p in self.connected_peers.values() if p.get('username')]
+                logger.error(f"❌ Пользователь {to_username} не найден. Доступны: {available}")
+                return None
+
+            # 5. Отправить запрос
             message = {
                 'type': 'call_request',
                 'call_id': call_id,
@@ -1924,35 +1991,17 @@ class P2PNetworkClient(QObject):
                 'timestamp': time.time(),
                 'media_info': media_info
             }
-    
-            # Ищем пользователя в подключенных пирах
-            target_peer = None
-            for peer_id, peer_info in list(self.connected_peers.items()):
-                if peer_info.get('username') == to_username:
-                    target_peer = peer_info
-                    break
-    
-            if target_peer:
-                if self._send_to_peer(target_peer, message):
-                    logger.info(f"📞 Отправлен запрос на звонок {call_id} пользователю {to_username}, порт {local_port}")
-                    
-                    
-                    self.call_requests[call_id] = {
-                        'to_user': to_username,
-                        'call_type': call_type,
-                        'status': 'outgoing',
-                        'timestamp': time.time()
-                    }
-                    
-                    self.call_received.emit('outgoing_call', to_username, call_type or 'audio', call_id)
-                    return call_id
-                else:
-                    logger.error(f"❌ Не удалось отправить запрос на звонок пользователю {to_username}")
-                    return None
+
+            if self._send_to_peer(target_peer, message):
+                logger.info(f"📞 Отправлен запрос на {call_type} звонок {call_id} пользователю {to_username}, аудио порт {local_port}")
+                if video_port:
+                    logger.info(f"📹 Видео порт для звонка {call_id}: {video_port}")
+                # Не отправляем сигнал outgoing_call, т.к. окно создаётся в gui
+                return call_id
             else:
-                logger.warning(f"⚠️ Пользователь {to_username} не найден в подключенных пирах")
+                logger.error(f"❌ Не удалось отправить запрос на звонок пользователю {to_username}")
                 return None
-        
+
         except Exception as e:
             logger.error(f"❌ Ошибка отправки запроса на звонок: {e}")
             return None
@@ -1999,9 +2048,15 @@ class P2PNetworkClient(QObject):
                     'call_type': call_type,
                     'media_info': media_info,
                     'peer_port': media_info.get('media_port'),
+                    'media_host': media_info.get('media_server', ''),
                     'status': 'incoming',
                     'timestamp': time.time()
                 }
+
+                # Если есть видео-порт, сохраняем его отдельно
+                if 'video_port' in media_info:
+                    self.call_requests[call_id]['video_port'] = media_info['video_port']
+                    logger.info(f"📹 Видео порт собеседника: {media_info['video_port']}")
 
                 # Отправляем сигнал в GUI
                 self.call_received.emit('incoming_call', from_user, call_type or 'audio', call_id)
