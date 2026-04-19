@@ -73,6 +73,7 @@ class P2PNetworkClient(QObject):
     user_list_updated = pyqtSignal(list)
     connection_status_changed = pyqtSignal(str)
     call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
+    video_socket_ready = pyqtSignal(str, object)
     
     def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()
@@ -998,79 +999,44 @@ class P2PNetworkClient(QObject):
         logger.info(f"🔌 Пир {username} ({peer_id}) полностью отключен")
             
     def setup_video_connection(self, call_id: str, peer_username: str) -> socket.socket:
-        """Настройка видео соединения"""
+        """Настройка видео соединения (серверная часть)"""
         try:
             logger.info(f"📹 Настройка видео соединения для звонка {call_id}")
             
-            # Ищем пира по имени пользователя
-            target_peer = None
-            for peer_id, peer_info in list(self.connected_peers.items()):
-                if peer_info.get('username') == peer_username:
-                    target_peer = peer_info
-                    break
-            
-            if not target_peer:
-                logger.error(f"❌ Пир {peer_username} не найден в подключенных")
+            # Получаем сохранённый видео порт (выделенный при отправке запроса)
+            call_info = self.call_requests.get(call_id, {})
+            video_port = call_info.get('video_local_port')
+            if not video_port:
+                logger.error(f"❌ Не найден видео порт для звонка {call_id}")
                 return None
             
-            peer_host, peer_port = target_peer['address']
-            
-            # Создаем серверный сокет для видео
+            # Создаём серверный сокет на этом порту
             video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             video_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            
-            # Находим свободный порт для видео
-            video_port = self._find_free_video_port()
-            if not video_port:
-                logger.error("❌ Не удалось найти свободный порт для видео")
-                return None
             
             try:
                 video_socket.bind(('0.0.0.0', video_port))
                 video_socket.listen(1)
                 video_socket.settimeout(10.0)
-                
                 logger.info(f"📹 Видео сервер запущен на порту {video_port}")
                 
-                # Отправляем информацию о видео порте другому пиру
-                video_info = {
-                    'type': 'video_info',
-                    'call_id': call_id,
-                    'video_port': video_port,
-                    'action': 'setup',
-                    'timestamp': time.time()
-                }
+                # Запускаем поток для принятия подключения
+                threading.Thread(
+                    target=self._accept_video_connection,
+                    args=(call_id, video_socket),
+                    daemon=True
+                ).start()
                 
-                success = self._send_to_peer(target_peer, video_info)
-                
-                if success:
-                    logger.info(f"✅ Информация о видео порте {video_port} отправлена")
-                    
-                    # Сохраняем сокет
-                    self.media_sockets[f"{call_id}_video"] = video_socket
-                    
-                    # Запускаем поток для принятия подключения
-                    threading.Thread(
-                        target=self._accept_video_connection,
-                        args=(call_id, video_socket),
-                        daemon=True
-                    ).start()
-                    
-                    return video_socket
-                else:
-                    logger.error(f"❌ Не удалось отправить информацию о видео порте")
-                    video_socket.close()
-                    return None
-                    
+                return video_socket
             except Exception as e:
-                logger.error(f"❌ Ошибка запуска видео сервера: {e}")
+                logger.error(f"❌ Ошибка запуска видео сервера на порту {video_port}: {e}")
                 video_socket.close()
                 return None
                 
         except Exception as e:
             logger.error(f"❌ Ошибка настройки видео соединения: {e}")
             return None
-   
+
     def _accept_video_connection(self, call_id: str, server_socket: socket.socket):
         """Принятие входящего видео подключения"""
         try:
@@ -1083,6 +1049,9 @@ class P2PNetworkClient(QObject):
             
             # Сохраняем клиентский сокет
             self.media_sockets[f"{call_id}_video"] = client_socket
+
+            # ОТПРАВЛЯЕМ СИГНАЛ, ЧТО КЛИЕНТСКИЙ СОКЕТ ГОТОВ
+            self.video_socket_ready.emit(call_id, client_socket)
             
             # Закрываем серверный сокет
             server_socket.close()
@@ -1094,7 +1063,11 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"❌ Ошибка принятия видео подключения: {e}")
         finally:
-            server_socket.close()
+            try:
+                server_socket.close()
+            except:
+                pass
+
 
     def _find_free_video_port(self):
         """Найти свободный порт для видео"""
@@ -1954,6 +1927,7 @@ class P2PNetworkClient(QObject):
                 if video_port:
                     media_info['video_port'] = video_port
                     logger.info(f"📹 Выделен видео-порт {video_port} для звонка {call_id}")
+                    logger.info(f"📹 Отправляем media_info: {media_info}")
                 else:
                     logger.warning(f"⚠️ Не удалось выделить видео-порт для звонка {call_id}, видеопоток не будет работать")
 
@@ -2039,24 +2013,29 @@ class P2PNetworkClient(QObject):
             call_type = data.get('call_type')
             media_info = data.get('media_info', {})
             
+            logger.info(f"📥 _handle_call_request: получен call_id={call_id}, media_info={media_info}")
+            
             if call_id and from_user:
                 logger.info(f"📞 Ответ на звонок {call_id} от {from_user}")
             
                 # Сохраняем информацию о звонке
-                self.call_requests[call_id] = {
-                    'from_user': from_user,
-                    'call_type': call_type,
-                    'media_info': media_info,
-                    'peer_port': media_info.get('media_port'),
-                    'media_host': media_info.get('media_server', ''),
-                    'status': 'incoming',
-                    'timestamp': time.time()
-                }
+                if call_id and from_user:
+                    self.call_requests[call_id] = {
+                        'from_user': from_user,
+                        'call_type': call_type,
+                        'media_info': media_info,
+                        'peer_port': media_info.get('media_port'),
+                        'media_host': media_info.get('media_server', ''),
+                        'status': 'incoming',
+                        'timestamp': time.time()
+                    }
 
                 # Если есть видео-порт, сохраняем его отдельно
                 if 'video_port' in media_info:
                     self.call_requests[call_id]['video_port'] = media_info['video_port']
                     logger.info(f"📹 Видео порт собеседника: {media_info['video_port']}")
+                else:
+                    logger.warning("⚠️ В media_info нет video_port")
 
                 # Отправляем сигнал в GUI
                 self.call_received.emit('incoming_call', from_user, call_type or 'audio', call_id)
