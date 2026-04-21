@@ -1,5 +1,6 @@
 import sys
 import os
+import queue
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QProgressBar, QMessageBox,
                              QSizePolicy)
@@ -51,7 +52,6 @@ class CallWindow(QWidget):
         self.blocksize = 1024
         
         # Буфер для аудио данных
-        import queue
         self.audio_buffer = queue.Queue(maxsize=20)
         
         # Счетчики для диагностики
