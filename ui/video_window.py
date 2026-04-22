@@ -6,9 +6,11 @@
 import sys
 import os
 import cv2
+import queue
 import threading
 import time
 import struct
+import sounddevice as sd
 import numpy as np
 import logging
 import socket
@@ -17,7 +19,7 @@ from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                              QFormLayout, QComboBox, QDialogButtonBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QThread, pyqtSignal as Signal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPalette, QColor, QRadialGradient
-import queue
+
 
 logger = logging.getLogger('dialog_video')
 
@@ -332,18 +334,12 @@ class VideoCallWindow(QWidget):
         self.is_outgoing = is_outgoing
         self._is_closing = False
 
-        # Создаем аудиопоток для звука
-        from call_window import CallWindow
-        self.audio_call = CallWindow(username, 'audio', call_id, is_outgoing, parent=self,
-                                    input_device=input_device, output_device=output_device)
-        self.audio_call.setVisible(False)          # не показываем окно
         
 
-        
+        # Вместо аудио-окна создаём ядро аудио
+        self.audio_core = AudioCallCore(call_id)
 
-        # Перехватываем любые попытки показать окно и скрываем их
-        self.audio_call.showEvent = lambda e: self.audio_call.hide()
-            
+        
         # Видео параметры
         self.camera_index = camera_index
         self.resolution = resolution
@@ -355,9 +351,7 @@ class VideoCallWindow(QWidget):
         
         # Компоненты
         self.capture_thread = None
-        self.video_processor = VideoProcessor()
-        
-        import queue
+        self.video_processor = VideoProcessor()        
         self.remote_frame_queue = queue.Queue(maxsize=5)
         
         # Сокеты для видео
@@ -375,9 +369,7 @@ class VideoCallWindow(QWidget):
         # UI
         self.init_ui()
         self.setup_video_capture()
-
-
-        
+     
     def init_ui(self):
         """Инициализация интерфейса"""
         self.setWindowTitle(f"📹 Видеозвонок с {self.username}")
@@ -853,9 +845,9 @@ class VideoCallWindow(QWidget):
     
     def toggle_mute(self):
         """Включить/выключить микрофон в скрытом аудио-окне"""
-        if hasattr(self.audio_call, 'toggle_mute'):
-            self.audio_call.toggle_mute()
-            if self.audio_call.muted:
+        if hasattr(self.audio_core, 'toggle_mute'):
+            self.audio_core.toggle_mute()
+            if self.audio_core.muted:
                 self.mute_button.setText("🔊 Включить микрофон")
                 self.mute_button.setStyleSheet("""
                     QPushButton {
@@ -975,42 +967,16 @@ class VideoCallWindow(QWidget):
                 self.socket_check_timer.start(500)
 
     def set_audio_socket(self, socket):
-        """Установить аудио-сокет в скрытое окно"""
-        result = False
-        try:
-            if hasattr(self.audio_call, 'set_call_socket'):
-                result = self.audio_call.set_call_socket(socket)
-            self.audio_call.hide()
-            if result:
-                if hasattr(self.audio_call, 'initialize_audio_streams'):
-                    self.audio_call.initialize_audio_streams()
-        except Exception as e:
-            logger.error(f"Ошибка установки аудио-сокета: {e}")
-            result = False
-        return result
-    
-    
-    # Методы для совместимости с CallWindow
-    @property
-    def socket_set(self):
-        return self.video_socket_set
-
-    def set_call_socket(self, socket):
-        return self.set_video_socket(socket)
-
-    @property
-    def call_socket(self):
-        return self.video_socket
+        """Передать аудио-сокет от P2P сети"""
+        self.audio_core.set_socket(socket)
+        
 
     def start_call(self):
         """Начать видеозвонок после получения подтверждения"""
-        if self._is_closing:
-            return
-        logger.info("🎥 Запуск видеозвонка")
         if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
             self.capture_thread.start()
-            logger.info("🎥 Захват видео запущен")
-        self.audio_call.start_call()          # запускает аудио‑потоки
+        self.audio_core.start()          
+        # запускает аудио
         self.status_label.setText("🟢 Видеозвонок активен")
         self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
 
@@ -1056,17 +1022,14 @@ class VideoCallWindow(QWidget):
     
     def end_call(self):
         """Завершить видеозвонок"""
-        if self._is_closing:
-            return
-        self._is_closing = True
         self.stop_video_capture()
+        self.audio_core.stop()
         self.video_socket_set = False
         if self.video_socket:
             try:
                 self.video_socket.close()
             except:
                 pass
-        self.audio_call.end_call()
         self.call_ended.emit(self.call_id)
         self.close()
     
@@ -1079,7 +1042,7 @@ class VideoCallWindow(QWidget):
         self.video_socket_set = False
         if self.video_socket:
             self.video_socket.close()
-        self.audio_call.end_call()
+        self.audio_core.stop()
         if hasattr(self, 'receive_thread') and self.receive_thread:
             self.receive_thread.join(timeout=1.0)
         event.accept()
@@ -1099,3 +1062,158 @@ class VideoCallWindow(QWidget):
 
         painter.fillRect(rect, gradient)
         
+
+class AudioCallCore:
+    """Управляет аудио-потоками для видеозвонка (без GUI)"""
+    def __init__(self, call_id, sample_rate=44100, chunk_size=1024):
+        self.call_id = call_id
+        self.sample_rate = sample_rate
+        self.chunk_size = chunk_size
+        self.audio_socket = None
+        self.is_running = False
+        self.input_stream = None
+        self.output_stream = None
+        self._recv_thread = None
+        self._send_thread = None
+        self._send_queue = queue.Queue(maxsize=50)
+        self._recv_queue = queue.Queue(maxsize=50)
+        self.muted = False
+        self._stop_requested = False
+
+    def set_socket(self, sock):
+        self.audio_socket = sock
+        if self.audio_socket:
+            self.audio_socket.settimeout(0.1)
+            self.audio_socket.setblocking(False)
+        if self.is_running:
+            self.start_streams()
+
+    def start_streams(self):
+        if not self.audio_socket:
+            logger.warning("AudioCallCore: нет сокета для запуска потоков")
+            return
+        try:
+            self.input_stream = sd.InputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype='int16',
+                blocksize=self.chunk_size,
+                callback=self._audio_input_callback
+            )
+            self.output_stream = sd.OutputStream(
+                samplerate=self.sample_rate,
+                channels=1,
+                dtype='int16',
+                blocksize=self.chunk_size,
+                callback=self._audio_output_callback
+            )
+            self.input_stream.start()
+            self.output_stream.start()
+
+            self._send_thread = threading.Thread(target=self._send_loop, daemon=True)
+            self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+            self._send_thread.start()
+            self._recv_thread.start()
+
+            logger.info(f"AudioCallCore: аудио-потоки запущены для звонка {self.call_id}")
+        except Exception as e:
+            logger.error(f"AudioCallCore: ошибка инициализации аудио: {e}")
+            self.stop()
+
+    def _audio_input_callback(self, indata, frames, time, status):
+        if status:
+            logger.debug(f"Аудио входной статус: {status}")
+        if not self.muted and self.is_running:
+            try:
+                data = indata.tobytes()
+                self._send_queue.put_nowait(data)
+            except queue.Full:
+                pass
+
+    def _audio_output_callback(self, outdata, frames, time, status):
+        if status:
+            logger.debug(f"Аудио выходной статус: {status}")
+        try:
+            data = self._recv_queue.get_nowait()
+            samples = np.frombuffer(data, dtype=np.int16).reshape(-1, 1)
+            if len(samples) < frames:
+                outdata[:len(samples)] = samples
+                outdata[len(samples):].fill(0)
+            else:
+                outdata[:] = samples[:frames]
+        except queue.Empty:
+            outdata.fill(0)
+
+    def _send_loop(self):
+        while self.is_running and not self._stop_requested and self.audio_socket:
+            try:
+                data = self._send_queue.get(timeout=0.1)
+                try:
+                    self.audio_socket.sendall(data)
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    # Сокет закрыт на другой стороне - выходим из цикла
+                    logger.warning(f"AudioCallCore: сокет закрыт при отправке ({e})")
+                    break
+                except BlockingIOError:
+                    self._send_queue.put(data)
+                    time.sleep(0.01)
+                except Exception as e:
+                    logger.error(f"Ошибка отправки аудио: {e}")
+            except queue.Empty:
+                continue
+        logger.info(f"AudioCallCore: поток отправки завершён для звонка {self.call_id}")
+
+    def _recv_loop(self):
+        try:
+            while self.is_running and not self._stop_requested and self.audio_socket:
+                try:
+                    data = self.audio_socket.recv(self.chunk_size * 2)
+                    if data:
+                        self._recv_queue.put(data)
+                except socket.timeout:
+                    continue
+                except BlockingIOError:
+                    time.sleep(0.001)
+                except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                    # Сокет закрыт - выходим
+                    logger.warning(f"AudioCallCore: сокет закрыт при приёме ({e})")
+                    break
+                except Exception as e:
+                    logger.error(f"AudioCallCore: ошибка в recv_loop: {e}")
+                    break
+        except Exception as e:
+            logger.error(f"AudioCallCore: критическая ошибка в recv_loop: {e}")
+        logger.info(f"AudioCallCore: поток приёма завершён для звонка {self.call_id}")
+
+    def start(self):
+        self.is_running = True
+        if self.audio_socket:
+            self.start_streams()
+
+    def stop(self):
+        self.is_running = False
+        if self.input_stream:
+            try:
+                self.input_stream.stop()
+                self.input_stream.close()
+            except:
+                pass
+            self.input_stream = None
+        if self.output_stream:
+            try:
+                self.output_stream.stop()
+                self.output_stream.close()
+            except:
+                pass
+            self.output_stream = None
+        if self.audio_socket:
+            try:
+                self.audio_socket.close()
+            except:
+                pass
+            self.audio_socket = None
+        logger.info(f"AudioCallCore: аудио-потоки остановлены для звонка {self.call_id}")
+
+    def toggle_mute(self):
+        self.muted = not self.muted
+        logger.info(f"AudioCallCore: микрофон {'выключен' if self.muted else 'включен'}")
