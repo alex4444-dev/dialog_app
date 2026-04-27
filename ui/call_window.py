@@ -34,6 +34,8 @@ class CallWindow(QWidget):
         self.socket_set = False
         self.input_device = input_device   # теперь сохраняем переданные устройства
         self.output_device = output_device
+        self._recv_buffer = b''   # буфер для приёма данных
+
 
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
 
@@ -49,7 +51,7 @@ class CallWindow(QWidget):
         self.sample_rate = 44100
         self.channels = 1
         self.dtype = 'float32'
-        self.blocksize = 1024
+        self.blocksize = 2048
         
         # Буфер для аудио данных
         self.audio_buffer = queue.Queue(maxsize=20)
@@ -88,20 +90,20 @@ class CallWindow(QWidget):
 
         logger.info(f"🔊 CallWindow создано успешно")
         
+    
     def init_ui(self):
         """Инициализация интерфейса окна звонка"""
-        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint) 
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setWindowTitle(f"📞 Звонок с {self.username}")
         self.setFixedSize(650, 480)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
-        
 
         # Главный layout
         main_layout = QVBoxLayout()
         main_layout.setSpacing(10)
         main_layout.setContentsMargins(15, 15, 15, 15)
-        
+
         # Заголовок
         title_text = "Исходящий звонок" if self.is_outgoing else "Входящий звонок"
         self.title_label = QLabel(f"📞 {title_text}")
@@ -109,24 +111,21 @@ class CallWindow(QWidget):
         self.title_label.setStyleSheet("font-size: 18px; font-weight: bold; color: #ffffff; margin-bottom: 5px;")
         self.title_label.setWordWrap(True)
         main_layout.addWidget(self.title_label)
-        
-        # ---- Аватар  ----
+
+        # Аватар
         self.avatar_label = QLabel()
-        # Загружаем изображение
         script_dir = os.path.dirname(os.path.abspath(__file__))
         img_path = os.path.join(script_dir, "assets", "img", "background.png")
         pixmap = QPixmap(img_path)
         if not pixmap.isNull():
-            # Масштабируем до 300x300 (можно изменить)
             scaled = pixmap.scaled(150, 150, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             self.avatar_label.setPixmap(scaled)
             self.avatar_label.setFixedSize(scaled.size())
             self.avatar_label.setVisible(True)
-        # Убираем старые стили с рамкой и фоном, делаем прозрачным
         self.avatar_label.setAlignment(Qt.AlignCenter)
         self.avatar_label.setStyleSheet("background-color: transparent;")
         main_layout.addWidget(self.avatar_label, 0, Qt.AlignCenter)
-       
+
         # Информация о звонке
         info_label = QLabel(f"Пользователь: {self.username}")
         info_label.setAlignment(Qt.AlignCenter)
@@ -134,145 +133,145 @@ class CallWindow(QWidget):
         info_label.setWordWrap(True)
         main_layout.addWidget(info_label)
 
-     
         # Индикатор состояния аудио
         self.audio_status_label = QLabel("🔇 Аудио: проверка...")
         self.audio_status_label.setAlignment(Qt.AlignCenter)
         self.audio_status_label.setStyleSheet("font-size: 16px; color: #FFFFFF; margin: 5px 0;")
         self.audio_status_label.setWordWrap(True)
         main_layout.addWidget(self.audio_status_label)
-         
-        
+
         # Таймер звонка
         self.duration_label = QLabel("00:00")
         self.duration_label.setAlignment(Qt.AlignCenter)
         self.duration_label.setStyleSheet("font-size: 32px; font-weight: bold; color: #FFFFFF; background-color: transparent; padding: 3px; margin: 3px 0;")
         self.duration_label.setVisible(False)
         main_layout.addWidget(self.duration_label)
-        
+
         # Статус звонка
         self.status_label = QLabel("Набор номера..." if self.is_outgoing else "Входящий вызов...")
         self.status_label.setAlignment(Qt.AlignCenter)
         self.status_label.setStyleSheet("font-size: 16px; color: #ffffff; margin: 10px 0; font-weight: 500; padding: 5px; background-color: transparent;")
         self.status_label.setWordWrap(True)
         main_layout.addWidget(self.status_label)
-        
-        
+
         # Растягивающийся элемент для выравнивания
         main_layout.addStretch(1)
-        
-        # Кнопки управления звонком
+
+        # --- Кнопки управления звонком ---
         buttons_layout = QHBoxLayout()
-        buttons_layout.setSpacing(15) 
+        buttons_layout.setSpacing(15)
 
-
+        # start_button – всегда создаём, но показываем только для исходящего
+        self.start_button = QPushButton("📞 Начать звонок")
+        self.start_button.clicked.connect(self.start_call)
+        self.start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
         if self.is_outgoing:
-            # Для исходящего звонка - только кнопка "Позвонить"
-            self.start_button = QPushButton("📞 Начать звонок")
-            self.start_button.clicked.connect(self.start_call)
-            self.start_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #c0392b;
-                }
-            """)
             buttons_layout.addWidget(self.start_button)
+        else:
+            self.start_button.hide()
 
-            self.cancel_button = QPushButton("❌ Отмена")
-            self.cancel_button.clicked.connect(self.cancel_call)
-            self.cancel_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #f44336;
-                    color: white;
-                    font-size: 14px;
-                    padding: 10px;
-                    border-radius: 5px;
-                }
-                QPushButton:hover {
-                    background-color: #d32f2f;
-                }
-            """)
+        # cancel_button – только для исходящего
+        self.cancel_button = QPushButton("❌ Отмена")
+        self.cancel_button.clicked.connect(self.cancel_call)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #f44336;
+                color: white;
+                font-size: 14px;
+                padding: 10px;
+                border-radius: 5px;
+            }
+            QPushButton:hover {
+                background-color: #d32f2f;
+            }
+        """)
+        if self.is_outgoing:
             buttons_layout.addWidget(self.cancel_button)
+        else:
+            self.cancel_button.hide()
 
         # Кнопка видеозвонка (только для исходящих)
+        self.video_button = QPushButton("📹 Видеозвонок")
+        self.video_button.setFixedHeight(45)
+        self.video_button.setStyleSheet("""
+            QPushButton {
+                background-color: #9b59b6;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #8e44ad;
+            }
+        """)
+        self.video_button.clicked.connect(self.upgrade_to_video)
         if self.is_outgoing:
-            self.video_button = QPushButton("📹 Видеозвонок")
-            self.video_button.setFixedHeight(45)
-            self.video_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #9b59b6;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #8e44ad;
-                }
-            """)
-            self.video_button.clicked.connect(self.upgrade_to_video)
             buttons_layout.addWidget(self.video_button)
-
-            
         else:
-            # Для входящего звонка - кнопки принятия и отклонения
-            self.accept_button = QPushButton("✅ Принять")
-            self.accept_button.clicked.connect(self.accept_call)
-            
-            self.accept_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #27ae60;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #219a52;
-                }
-            """)
-            buttons_layout.addWidget(self.accept_button)
-            
-            self.reject_button = QPushButton("❌ Отклонить")
-            self.reject_button.clicked.connect(self.reject_call)
-            self.reject_button.setStyleSheet("""
-                QPushButton {
-                    background-color: #e74c3c;
-                    color: white;
-                    border: none;
-                    padding: 10px;
-                    border-radius: 5px;
-                    font-weight: bold;
-                    font-size: 14px;
-                }
-                QPushButton:hover {
-                    background-color: #c0392b;
-                }
-            """)
-            buttons_layout.addWidget(self.reject_button)
-            
-        main_layout.addLayout(buttons_layout)
-        
-        self.setLayout(main_layout)
-        
-        # Инициализировать call_timer
-        self.duration_timer = QTimer()
-        self.duration_timer.timeout.connect(self.update_duration)
+            self.video_button.hide()
 
-            
-        # ---- Активные кнопки (для активного звонка) ----
+        # Кнопки для входящего звонка
+        self.accept_button = QPushButton("✅ Принять")
+        self.accept_button.clicked.connect(self.accept_call)
+        self.accept_button.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #219a52;
+            }
+        """)
+        if not self.is_outgoing:
+            buttons_layout.addWidget(self.accept_button)
+        else:
+            self.accept_button.hide()
+
+        self.reject_button = QPushButton("❌ Отклонить")
+        self.reject_button.clicked.connect(self.reject_call)
+        self.reject_button.setStyleSheet("""
+            QPushButton {
+                background-color: #e74c3c;
+                color: white;
+                border: none;
+                padding: 10px;
+                border-radius: 5px;
+                font-weight: bold;
+                font-size: 14px;
+            }
+            QPushButton:hover {
+                background-color: #c0392b;
+            }
+        """)
+        if not self.is_outgoing:
+            buttons_layout.addWidget(self.reject_button)
+        else:
+            self.reject_button.hide()
+
+        main_layout.addLayout(buttons_layout)
+
+        # --- Активные кнопки (для активного звонка) ---
         active_buttons_layout = QHBoxLayout()
         self.mute_button = QPushButton("🔊 Микрофон вкл")
         self.mute_button.clicked.connect(self.toggle_mute)
@@ -308,17 +307,19 @@ class CallWindow(QWidget):
         self.active_buttons_widget.setLayout(active_buttons_layout)
         self.active_buttons_widget.hide()
         main_layout.addWidget(self.active_buttons_widget)
-        
-        # Настройка таймера для обновления длительности звонка
-        self.duration_timer.timeout.connect(self.update_duration) 
- 
-    
+
         # Прогресс-бар (анимация ожидания)
         self.progress_bar = QProgressBar()
         self.progress_bar.setRange(0, 0)
         self.progress_bar.setVisible(True)
         self.progress_bar.setFixedHeight(6)
         main_layout.addWidget(self.progress_bar)
+
+        # Таймер для обновления длительности
+        self.duration_timer = QTimer()
+        self.duration_timer.timeout.connect(self.update_duration)
+
+        self.setLayout(main_layout)
 
     def toggle_mute(self):
         """Включение/выключение микрофона"""
@@ -342,7 +343,7 @@ class CallWindow(QWidget):
             self.send_audio_data(indata)
 
     def set_call_socket(self, call_socket):
-        """Установка сокета для звонка"""
+        """Установка клиентского сокета для звонка(исходящие)"""
         try:
             if call_socket is None:
                 return False
@@ -352,7 +353,7 @@ class CallWindow(QWidget):
             self.status_label.setText("🟢 Соединение установлено")
             # Если звонок уже активен, инициализируем аудио
             if self.is_active and not self.audio_initialized:
-                QTimer.singleShot(100, self.initialize_audio_streams)
+                QTimer.singleShot(100, self._do_start_call)
             return True                     
         except Exception as e:
             logger.error(f"❌ Ошибка установки сокета: {e}")
@@ -383,12 +384,15 @@ class CallWindow(QWidget):
             self.active_buttons_widget.show()
             self.duration_label.setVisible(True)
             self.progress_bar.hide()
+            self.is_active = True
             
 
             # Проверяем наличие сокета
             if not self.call_socket:
                 self.local_mode = True
                 self.status_label.setText("🔇 Локальный режим")
+            else:
+                self.local_mode = False
 
             if self.local_mode:
                 success = self.initialize_local_audio()
@@ -398,7 +402,6 @@ class CallWindow(QWidget):
             if success:
                 self.call_start_time = time.time()
                 self.duration_timer.start(1000)
-                self.is_active = True
                 self.status_label.setText("✅ Звонок активен")
                 self.call_accepted.emit(self.call_id)
                 logger.info(f"Звонок {self.call_id} принят")
@@ -585,78 +588,64 @@ class CallWindow(QWidget):
         self.reject_call()
   
     def start_call(self):
-        """Начать звонок (после принятия)"""
+        """Начать звонок (исходящий) - вызывается по кнопке"""
         try:
             logger.info(f"🔊 Запуск исходящего звонка {self.call_id}")
-            logger.info(f"DEBUG: is_outgoing={self.is_outgoing}, start_button exists: {hasattr(self, 'start_button')}")
+                        
             
-            
-            # Проверяем наличие кнопок
-            if not hasattr(self, 'start_button') or self.start_button is None:
-                logger.error("start_button отсутствует! Звонок не может быть запущен.")
-                QMessageBox.critical(self, "Ошибка", "Внутренняя ошибка интерфейса. Закройте окно и попробуйте снова.")
-                return
-
-            # Меняем интерфейс
-            self.start_button.hide()
+            # Скрываем кнопки
+            if not hasattr(self, 'start_button') or self.start_button:
+                self.start_button.hide()
             if hasattr(self, 'cancel_button') and self.cancel_button:
                 self.cancel_button.hide()
             self.active_buttons_widget.show()
             self.duration_label.setVisible(True)
-            
+            self.progress_bar.hide()
+
+
+            self.is_active = True  # устанавливаем флаг, что звонок активен
+
+                           
             # Проверяем наличие сокета
             if not self.call_socket:
-                logger.warning("⚠️ Сокет не установлен, пробуем получить от родителя")
+                # Если сокета ещё нет, пробуем получить от родителя или ждём
                 parent_socket = self.get_call_socket_from_parent()
                 
                 if parent_socket:
                     success = self.set_call_socket(parent_socket)
-                    if success:
-                        logger.info("✅ Сокет получен от родителя и установлен")
-                    else:
-                        logger.error("❌ Не удалось установить сокет от родителя")
-                        self.local_mode = True
                 else:
-                    logger.warning("⚠️ Не удалось получить сокет от родителя")
-                    self.local_mode = True
-            
-            # Если сокета все еще нет, устанавливаем локальный режим
-            if not self.call_socket:
-                logger.warning("⚠️ Звонок запускается без сокета - будет работать в локальном режиме")
-                self.local_mode = True
-                self.status_label.setText("🔇 Локальный режим (без сетевого аудио)")
-                
-            # Инициализируем аудио потоки
-            if self.local_mode:
-                success = self.initialize_local_audio()
-            else:
-                success = self.initialize_audio_streams()
-                
-            if success:
-                # Запускаем таймер длительности
-                self.call_start_time = time.time()
-                self.duration_timer.start(1000)
-                self.duration_label.setVisible(True)
-                self.progress_bar.hide()
-                self.is_active = True
-                
-                
-                # Обновляем статус
-                if self.local_mode:
-                    self.status_label.setText("🔇 Локальный режим (тестовый)")
-                    self.status_label.setStyleSheet("font-size: 12px; color: #f6ff4f;")
-                else:
-                    self.status_label.setText("✅ Звонок активен")
-                    self.status_label.setStyleSheet("font-size: 12px; color: #f7b7fd;")
-                
-                logger.info(f"✅ Звонок {self.call_id} успешно запущен")
-            else:
-                logger.error(f"❌ Не удалось инициализировать аудио для звонка {self.call_id}")
-                QMessageBox.warning(self, "Ошибка", "Не удалось инициализировать аудио. Проверьте настройки аудиоустройств.")
-            
+                    self.status_label.setText("⏳ Ожидание соединения...")
+                    QTimer.singleShot(1000, self.retry_start_call)
+                    return
+
+            self._do_start_call()
         except Exception as e:
             logger.error(f"❌ Ошибка запуска звонка: {e}")
-            QMessageBox.warning(self, "Ошибка", f"Ошибка запуска звонка: {e}")
+
+
+    def _do_start_call(self):
+        """Внутренний запуск звонка после того, как сокет установлен"""
+        if self.local_mode:
+            success = self.initialize_local_audio()
+        else:
+            success = self.initialize_audio_streams()
+
+        if success:
+            self.call_start_time = time.time()
+            self.duration_timer.start(1000)
+            self.status_label.setText("✅ Звонок активен")
+            logger.info(f"✅ Звонок {self.call_id} успешно запущен")
+        else:
+            self.status_label.setText("❌ Ошибка аудио")
+            logger.error(f"❌ Не удалось инициализировать аудио для звонка {self.call_id}")        
+
+    def retry_start_call(self):
+        """Повторная попытка запуска звонка, если сокет ещё не готов"""
+        if self.call_socket:
+            self._do_start_call()
+        else:
+            self.status_label.setText("⚠️ Соединение не установлено, повтор через 2 сек...")
+            QTimer.singleShot(2000, self.retry_start_call)
 
     def initialize_audio_streams(self):
         """Инициализация аудио потоков на выбранных устройствах"""
@@ -707,29 +696,11 @@ class CallWindow(QWidget):
                 try:
                     logger.info(f"🔧 Попытка конфигурации: {config}")
                     
-                    # ✅ Callback для захвата аудио с микрофона
                     def input_callback(indata, frames, time, status):
                         if status:
                             logger.debug(f"Аудио входной статус: {status}")
-                
-                        try:
-                            # ✅ Если микрофон отключен, не отправляем данные
-                            if self.muted:
-                                return
-
-
-                            if (self.call_socket and 
-                                self.is_active and self.audio_initialized and
-                                not self.local_mode):
-                                # Преобразуем в байты и отправляем
-                                audio_data = indata.astype(np.float32).tobytes()
-                                success = self.send_audio_data(audio_data)
-                                if success:
-                                    self.sent_packets += 1
-                                    if self.sent_packets % 50 == 0:
-                                        logger.debug(f"🎤 Отправлено пакетов: {self.sent_packets}")
-                        except Exception as e:
-                            logger.debug(f"Ошибка в input callback: {e}")
+                        if not self.muted and self.is_active and self.call_socket and not self.local_mode:
+                            self.send_audio_data(indata)   # indata уже float32
 
                     # Callback для воспроизведения аудио
                     def output_callback(outdata, frames, time, status):
@@ -921,83 +892,93 @@ class CallWindow(QWidget):
         except Exception as e:
             logger.debug(f"Ошибка получения аудио данных: {e}")
             return None
-    
+
     def send_audio_data(self, audio_data):
-        """Отправка аудио данных с проверкой соединения"""
+        """Отправка аудио данных"""
         if self.muted:
             return False
-        
+
         try:
             if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
                 return False
-
-            # Проверяем что сокет еще подключен
             try:
-                self.call_socket.send(b'')
-            except socket.error:
-                logger.warning("Сокет звонка отключен")
+                self.call_socket.fileno()
+            except (OSError, ValueError):
+                logger.debug("Сокет закрыт, прекращаем отправку")
                 self.is_active = False
                 return False
-            
-            # Добавляем заголовок с размером данных
-            data_size = len(audio_data)
-            header = struct.pack('I', data_size)
+
+            # Если передан numpy array, конвертируем в байты
+            if isinstance(audio_data, np.ndarray):
+                audio_data = audio_data.tobytes()
+
+            # Формируем пакет: заголовок (длина) + данные
+            header = struct.pack('!I', len(audio_data))
             full_data = header + audio_data
-        
-            # Отправляем данные
+
             sent = self.call_socket.send(full_data)
+            if sent:
+                self.sent_packets += 1
+                if self.sent_packets % 50 == 0:
+                    logger.debug(f"🎤 Отправлено пакетов: {self.sent_packets}")
             return sent > 0
-            
+
+        except (BrokenPipeError, ConnectionResetError, OSError) as e:
+            logger.debug(f"Сокет закрыт при отправке: {e}")
+            self.is_active = False
+            return False
         except Exception as e:
-            logger.debug(f"🔊 Ошибка отправки аудио данных: {e}")
+            logger.debug(f"Ошибка отправки аудио данных: {e}")
             return False
 
     def receive_audio_data(self):
-        """Прием аудио данных из сокета"""
+        """Прием аудио данных из сокета с буферизацией"""
         try:
-            if self.call_socket and self.is_active and self.audio_initialized and not self.local_mode:
-                
-                # Устанавливаем таймаут для неблокирующего чтения
-                self.call_socket.settimeout(0.1)
-        
-                # Читаем заголовок с размером данных
-                header = self.call_socket.recv(4)
-                if not header or len(header) < 4:
-                    return
+            if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
+                return
+                    # Проверим, что сокет ещё жив
+            try:
+                self.call_socket.fileno()
+            except (OSError, ValueError):
+                logger.debug("Сокет закрыт, выходим")
+                self.is_active = False
+                return
             
-                data_size = struct.unpack('I', header)[0]
-    
-                # Читаем аудио данные
-                audio_data = b''
-                while len(audio_data) < data_size:
-                    chunk = self.call_socket.recv(min(4096, data_size - len(audio_data)))
-                    if not chunk:
-                        break
-                    audio_data += chunk
-        
-                if len(audio_data) == data_size:
-                    # Преобразуем байты в numpy array
-                    audio_array = np.frombuffer(audio_data, dtype=np.float32)
-                
-                    # Добавляем в буфер
+            # Устанавливаем небольшой таймаут
+            self.call_socket.settimeout(0.5)
+
+            chunk = self.call_socket.recv(4096)
+            if not chunk:
+                return
+
+            self._recv_buffer += chunk
+
+            # Разбираем все полные пакеты
+            while len(self._recv_buffer) >= 4:
+                data_size = struct.unpack('!I', self._recv_buffer[:4])[0]
+                if len(self._recv_buffer) >= 4 + data_size:
+                    audio_bytes = self._recv_buffer[4:4+data_size]
+                    self._recv_buffer = self._recv_buffer[4+data_size:]
+
+                    audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
                     try:
                         self.audio_buffer.put_nowait(audio_array)
                     except queue.Full:
-                        # Если очередь переполнена, удаляем старый элемент и добавляем новый
+                        # переполнение – удаляем старый пакет
                         try:
                             self.audio_buffer.get_nowait()
                             self.audio_buffer.put_nowait(audio_array)
                         except queue.Empty:
                             pass
                 else:
-                    logger.debug("🔊 Не могу принять аудио: нет сокета или поток не инициализирован или локальный режим")
-                                        
+                    break
+
         except socket.timeout:
             pass
         except Exception as e:
             if self.is_active and not self.local_mode:
                 logger.debug(f"Ошибка приема аудио данных: {e}")
-
+        
     def start_audio_receiver(self):
         """Запуск потока для приема аудио данных"""
         if self.audio_receiver_running or self.local_mode:
@@ -1009,7 +990,7 @@ class CallWindow(QWidget):
             while self.is_active and self.call_socket and not self.local_mode and self.audio_receiver_running:
                 try:
                     self.receive_audio_data()
-                    time.sleep(0.01)  # небольшая пауза для снижения нагрузки
+                    time.sleep(0.005)  # небольшая пауза для снижения нагрузки
                 except Exception as e:
                     if self.is_active and not self.local_mode:
                         logger.debug(f"Ошибка в аудио приемнике: {e}")
@@ -1017,7 +998,7 @@ class CallWindow(QWidget):
             self.audio_receiver_running = False
             logger.info("Приемник аудио данных остановлен")
 
-        self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=False)
+        self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=True)
         self.audio_receiver_thread.start()
 
     def stop_audio_streams(self):

@@ -52,17 +52,21 @@ def _find_free_call_port(self):
     if not hasattr(self, 'media_ports'):
         self.media_ports = set()
     for port in range(9100, 9500):
-        if port not in self.media_ports:
-            try:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                    s.bind(('0.0.0.0', port))
-                    self.media_ports.add(port)
-                    return port
-            except OSError:
-                continue
-    logger.error("❌ Не найден свободный порт в диапазоне 9100-9500")
+        if port in self.media_ports:
+            continue
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                s.bind(('0.0.0.0', port))
+                self.media_ports.add(port)
+                return port
+        except OSError:
+            continue
     return None
+
+def _release_call_port(self, port):
+    if hasattr(self, 'media_ports') and port in self.media_ports:
+        self.media_ports.remove(port)
 
 
 class P2PNetworkClient(QObject):
@@ -1068,6 +1072,22 @@ class P2PNetworkClient(QObject):
             except:
                 pass
 
+    def wait_for_call_socket(self, call_id: str, timeout=10.0):
+        """Ожидание появления клиентского сокета для звонка (после установки соединения)"""
+        start = time.time()
+        while time.time() - start < timeout:
+            if call_id in self.media_sockets:
+                sock = self.media_sockets[call_id]
+                # Проверяем, что сокет не серверный (не слушает) и подключён
+                try:
+                    # Пытаемся отправить пустой пакет для проверки
+                    sock.send(b'')   
+                    return sock
+                except Exception as e:
+                    logger.debug(f"Сокет для звонка {call_id} ещё не готов: {e}")
+            time.sleep(0.2)
+        logger.warning(f"Таймаут ожидания сокета для звонка {call_id}")
+        return None
 
     def _find_free_video_port(self):
         """Найти свободный порт для видео"""
@@ -1175,68 +1195,71 @@ class P2PNetworkClient(QObject):
             return None
 
     def _connect_to_peer_call(self, call_id: str, peer_host: str, peer_port: int) -> socket.socket:
-        """Подключение к порту собеседника (используется для входящего звонка)"""
-        try:
-            logger.info(f"🔧 [_connect_to_peer_call] Звонок {call_id}: подключение к {peer_host}:{peer_port}")
-            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            client_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            client_socket.settimeout(10.0)
-            client_socket.connect((peer_host, peer_port))
-            client_socket.settimeout(30.0)
-            
-            # Отправляем подтверждение
-            call_info = {'type': 'call_connect', 'call_id': call_id, 'action': 'connect', 'from': self.username}
-            client_socket.send(json.dumps(call_info).encode())
-            
-            # Ждём ответа
-            response = client_socket.recv(1024)
-            if response:
-                resp = json.loads(response.decode())
-                if resp.get('status') == 'connected':
-                    logger.info(f"✅ [_connect_to_peer_call] Звонок {call_id}: подключение установлено")
-                    return client_socket
-            
-            logger.error(f"❌ [_connect_to_peer_call] Звонок {call_id}: подтверждение не получено")
-            client_socket.close()
-            return None
-        except Exception as e:
-            logger.error(f"❌ [_connect_to_peer_call] Звонок {call_id}: ошибка: {e}")
-            return None
+        for attempt in range(5):
+            try:
+                client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                client_socket.settimeout(5.0)
+                client_socket.connect((peer_host, peer_port))
+                client_socket.settimeout(30.0)
+
+                msg = {'type': 'call_connect', 'call_id': call_id, 'action': 'connect', 'from': self.username}
+                client_socket.send(json.dumps(msg).encode())
+
+                resp_data = client_socket.recv(1024)
+                if resp_data:
+                    resp = json.loads(resp_data.decode())
+                    if resp.get('status') == 'connected' and resp.get('call_id') == call_id:
+                        logger.info(f"✅ Соединение для звонка {call_id} установлено")
+                        return client_socket
+                client_socket.close()
+            except Exception as e:
+                logger.warning(f"Попытка {attempt+1} не удалась: {e}")
+            time.sleep(1)
+        return None
 
     def _wait_for_call_connection(self, call_id: str, server_socket: socket.socket):
-        """Ожидание входящего подключения для звонка (серверная сторона)"""
+        attempts = 0
+        max_attempts = 10
         try:
-            logger.info(f"🔄 Ожидание подключения для звонка {call_id}...")
-            client_socket, client_addr = server_socket.accept()
-            client_socket.settimeout(30.0)
-            logger.info(f"✅ Подключение для звонка {call_id} установлено от {client_addr}")
+            server_socket.settimeout(0.5)   # неблокирующий режим для цикла
+            while attempts < max_attempts and self.is_running:
+                try:
+                    client_socket, client_addr = server_socket.accept()
+                    client_socket.settimeout(30.0)
+                    logger.info(f"✅ Подключение для звонка {call_id} от {client_addr}")
 
-            # Получаем информацию о звонке (ожидаем call_connect)
-            data = client_socket.recv(1024)
-            if data:
-                call_info = json.loads(data.decode())
-                if call_info.get('type') == 'call_connect':
-                    # Отправляем подтверждение
-                    response = {'status': 'connected', 'call_id': call_id}
-                    client_socket.send(json.dumps(response).encode())
-                    # Заменяем серверный сокет на клиентский
-                    self.media_sockets[call_id] = client_socket
-                    # Закрываем серверный сокет
-                    server_socket.close()
-                    logger.info(f"✅ Соединение для звонка {call_id} полностью установлено")
-                    return
+                    # Ждём call_connect
+                    data = client_socket.recv(1024)
+                    if data:
+                        call_info = json.loads(data.decode())
+                        if call_info.get('type') == 'call_connect' and call_info.get('call_id') == call_id:
+                            response = {'status': 'connected', 'call_id': call_id}
+                            client_socket.send(json.dumps(response).encode())
+                            # Заменяем серверный сокет на клиентский
+                            self.media_sockets[call_id] = client_socket
+                            server_socket.close()
+                            logger.info(f"✅ Соединение для звонка {call_id} полностью установлено")
+                            return
+                    client_socket.close()
+                except socket.timeout:
+                    pass
+                except BlockingIOError:
+                    time.sleep(0.1)
+                attempts += 1
+                time.sleep(0.5)
 
-            logger.error(f"❌ Неверные данные подключения для звонка {call_id}")
-            client_socket.close()
-
-        except socket.timeout:
-            logger.error(f"❌ Таймаут ожидания подключения для звонка {call_id}")
+            logger.error(f"❌ Не удалось установить соединение для звонка {call_id}")
+            if call_id in self.media_sockets:
+                del self.media_sockets[call_id]
         except Exception as e:
             logger.error(f"❌ Ошибка ожидания подключения: {e}")
         finally:
-            if call_id in self.media_sockets and self.media_sockets[call_id] == server_socket:
-                del self.media_sockets[call_id]
-    
+            server_socket.close()
+            # Освобождаем порт
+            if call_id in self.call_requests and 'local_port' in self.call_requests[call_id]:
+                self._release_call_port(self.call_requests[call_id]['local_port'])
+
+
     def get_call_socket(self, call_id: str) -> socket.socket:
         """Получение сокета для звонка"""
         try:

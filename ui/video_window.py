@@ -337,7 +337,11 @@ class VideoCallWindow(QWidget):
         
 
         # Вместо аудио-окна создаём ядро аудио
-        self.audio_core = AudioCallCore(call_id)
+        self.audio_core = AudioCallCore(
+            call_id,
+            input_device=input_device,
+            output_device=output_device        
+        )
 
         
         # Видео параметры
@@ -967,18 +971,29 @@ class VideoCallWindow(QWidget):
                 self.socket_check_timer.start(500)
 
     def set_audio_socket(self, socket):
-        """Передать аудио-сокет от P2P сети"""
+        """Передать аудио-сокет от P2P сети и запустить аудио"""
+        if socket is None:
+            return
         self.audio_core.set_socket(socket)
+        # Всегда запускаем аудио, start() проверит is_running и при необходимости создаст потоки
+        # Убедимся, что устройства не сброшены
+        if hasattr(self, 'input_device') and self.input_device is not None:
+            self.audio_core.input_device = self.input_device
+        if hasattr(self, 'output_device') and self.output_device is not None:
+            self.audio_core.output_device = self.output_device
+        self.audio_core.start()
+        logger.info(f"🎤 Аудио-сокет установлен и запущен для звонка {self.call_id}")
         
-
     def start_call(self):
         """Начать видеозвонок после получения подтверждения"""
         if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
             self.capture_thread.start()
-        self.audio_core.start()          
-        # запускает аудио
+        # Аудио уже должно быть запущено в set_audio_socket, но на всякий случай проверим
+        if not self.audio_core.is_running and self.audio_core.audio_socket:
+            self.audio_core.start()
         self.status_label.setText("🟢 Видеозвонок активен")
         self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
+        
 
     def accept_call(self):
         """Принять видеозвонок"""
@@ -1065,8 +1080,10 @@ class VideoCallWindow(QWidget):
 
 class AudioCallCore:
     """Управляет аудио-потоками для видеозвонка (без GUI)"""
-    def __init__(self, call_id, sample_rate=44100, chunk_size=1024):
+    def __init__(self, call_id, input_device=None, output_device=None, sample_rate=44100, chunk_size=2048):
         self.call_id = call_id
+        self.input_device = input_device
+        self.output_device = output_device
         self.sample_rate = sample_rate
         self.chunk_size = chunk_size
         self.audio_socket = None
@@ -1079,12 +1096,15 @@ class AudioCallCore:
         self._recv_queue = queue.Queue(maxsize=50)
         self.muted = False
         self._stop_requested = False
+        self._connect_attempts = 0
+        self._max_connect_attempts = 5
 
     def set_socket(self, sock):
         self.audio_socket = sock
         if self.audio_socket:
+             # Переводим сокет в неблокирующий режим с таймаутом
             self.audio_socket.settimeout(0.1)
-            self.audio_socket.setblocking(False)
+            #self.audio_socket.setblocking(False)
         if self.is_running:
             self.start_streams()
 
@@ -1094,16 +1114,18 @@ class AudioCallCore:
             return
         try:
             self.input_stream = sd.InputStream(
+                device=self.input_device,
                 samplerate=self.sample_rate,
                 channels=1,
-                dtype='int16',
+                dtype='float32',
                 blocksize=self.chunk_size,
                 callback=self._audio_input_callback
             )
             self.output_stream = sd.OutputStream(
+                device=self.output_device,
                 samplerate=self.sample_rate,
                 channels=1,
-                dtype='int16',
+                dtype='float32',
                 blocksize=self.chunk_size,
                 callback=self._audio_output_callback
             )
@@ -1135,7 +1157,7 @@ class AudioCallCore:
             logger.debug(f"Аудио выходной статус: {status}")
         try:
             data = self._recv_queue.get_nowait()
-            samples = np.frombuffer(data, dtype=np.int16).reshape(-1, 1)
+            samples = np.frombuffer(data, dtype=np.float32).reshape(-1, 1)
             if len(samples) < frames:
                 outdata[:len(samples)] = samples
                 outdata[len(samples):].fill(0)
@@ -1147,43 +1169,71 @@ class AudioCallCore:
     def _send_loop(self):
         while self.is_running and not self._stop_requested and self.audio_socket:
             try:
-                data = self._send_queue.get(timeout=0.1)
+                # Проверка сокета
                 try:
-                    self.audio_socket.sendall(data)
-                except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                    # Сокет закрыт на другой стороне - выходим из цикла
-                    logger.warning(f"AudioCallCore: сокет закрыт при отправке ({e})")
+                    self.audio_socket.fileno()
+                except (OSError, ValueError):
+                    logger.warning("AudioCallCore: сокет закрыт, выходим из send_loop")
                     break
-                except BlockingIOError:
-                    self._send_queue.put(data)
-                    time.sleep(0.01)
-                except Exception as e:
-                    logger.error(f"Ошибка отправки аудио: {e}")
+
+                data = self._send_queue.get(timeout=0.1)
+                packet = struct.pack('!I', len(data)) + data
+                self.audio_socket.sendall(packet)
             except queue.Empty:
                 continue
-        logger.info(f"AudioCallCore: поток отправки завершён для звонка {self.call_id}")
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(f"AudioCallCore: потеря соединения в send_loop: {e}")
+                break
+            except Exception as e:
+                logger.error(f"Ошибка отправки аудио: {e}")
+                break
 
     def _recv_loop(self):
-        try:
-            while self.is_running and not self._stop_requested and self.audio_socket:
+        buffer = b''
+        while self.is_running and not self._stop_requested and self.audio_socket:
+            try:
+                # Проверка сокета
                 try:
-                    data = self.audio_socket.recv(self.chunk_size * 2)
-                    if data:
-                        self._recv_queue.put(data)
-                except socket.timeout:
-                    continue
-                except BlockingIOError:
-                    time.sleep(0.001)
-                except (BrokenPipeError, ConnectionResetError, OSError) as e:
-                    # Сокет закрыт - выходим
-                    logger.warning(f"AudioCallCore: сокет закрыт при приёме ({e})")
+                    self.audio_socket.fileno()
+                except (OSError, ValueError):
+                    logger.warning("AudioCallCore: сокет закрыт, выходим из recv_loop")
                     break
-                except Exception as e:
-                    logger.error(f"AudioCallCore: ошибка в recv_loop: {e}")
+
+                chunk = self.audio_socket.recv(4096)
+                if not chunk:
                     break
-        except Exception as e:
-            logger.error(f"AudioCallCore: критическая ошибка в recv_loop: {e}")
-        logger.info(f"AudioCallCore: поток приёма завершён для звонка {self.call_id}")
+                buffer += chunk
+                while len(buffer) >= 4:
+                    payload_len = struct.unpack('!I', buffer[:4])[0]
+                    if len(buffer) >= 4 + payload_len:
+                        audio_data = buffer[4:4+payload_len]
+                        self._recv_queue.put(audio_data)
+                        buffer = buffer[4+payload_len:]
+                    else:
+                        break
+            except socket.timeout:
+                continue
+            except BlockingIOError:
+                time.sleep(0.001)
+            except (BrokenPipeError, ConnectionResetError, OSError) as e:
+                logger.warning(f"AudioCallCore: потеря соединения в recv_loop: {e}")
+                break
+            except Exception as e:
+                logger.error(f"Ошибка приёма аудио: {e}")
+                break   
+    
+    def _reconnect(self):
+        """Попытка восстановить аудио-соединение"""
+        if self._connect_attempts >= self._max_connect_attempts:
+            logger.error("AudioCallCore: превышено число попыток восстановления")
+            self.stop()
+            return
+        self._connect_attempts += 1
+        logger.info(f"AudioCallCore: попытка восстановления {self._connect_attempts}/{self._max_connect_attempts}")
+        # Перезапускаем потоки (сокет остаётся тем же)
+        self.stop_streams()
+        time.sleep(0.5)
+        self.start_streams()
 
     def start(self):
         self.is_running = True

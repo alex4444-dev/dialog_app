@@ -915,6 +915,21 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"❌ Ошибка принудительной установки сокета: {e}")
             return False
 
+    def _set_audio_socket_with_retry(self, video_window, call_id, timeout=5):
+        """Ожидает появления клиентского аудио-сокета и устанавливает его в окно видеозвонка"""
+        def wait_and_set():
+            try:
+                client_sock = self.p2p_client.wait_for_call_socket(call_id, timeout=timeout)
+                if client_sock:
+                    video_window.set_audio_socket(client_sock)
+                    logger.info(f"✅ Аудио-сокет для звонка {call_id} установлен")
+                else:
+                    logger.error(f"❌ Не удалось получить клиентский аудио-сокет для звонка {call_id}")
+                    video_window.status_label.setText("❌ Ошибка: аудио не работает")
+            except Exception as e:
+                logger.error(f"Ошибка в _set_audio_socket_with_retry: {e}")
+        threading.Thread(target=wait_and_set, daemon=True).start()
+
     def show_incoming_call(self, call_id, from_user, call_type):
         """Показать окно входящего звонка"""
         try:
@@ -1205,24 +1220,30 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"Трассировка: {traceback.format_exc()}")
             return False
 
-    def start_call(self, username, call_type):
-        """Начать звонок с пользователем через P2P сеть"""
+    def start_call(self, username, call_type='audio'):
+        """Начать аудиозвонок с пользователем (исходящий)"""
+        online_users = self.p2p_client.get_online_users()
+        if not any(u['username'] == username for u in online_users):
+            QMessageBox.warning(self, 'Ошибка', f'Пользователь {username} не в сети')
+            return
+
         if not self.p2p_client:
             QMessageBox.warning(self, 'Ошибка', 'P2P клиент не инициализирован')
             return
-            
-        # Отправляем запрос на звонок
+
         call_id = self.p2p_client.send_call_request(username, call_type)
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на звонок')
             return
 
-        # Создаем окно звонка
-        call_window = CallWindow(username, call_type, call_id, is_outgoing=True, parent=self,
-                                input_device=self.audio_input_device,
-                                output_device=self.audio_output_device)
+        # Создаём окно аудиозвонка
+        call_window = CallWindow(
+            username, call_type, call_id, is_outgoing=True, parent=self,
+            input_device=self.audio_input_device,
+            output_device=self.audio_output_device
+        )
         call_window.call_ended.connect(self.end_call)
-        
+
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
             'window': call_window,
@@ -1232,30 +1253,34 @@ class P2PMainWindow(QMainWindow):
             'status': 'pending'
         }
 
-        # НЕМЕДЛЕННО получаем и устанавливаем сокет (без задержки)
-        logger.info("🔧 Немедленная настройка медиа для исходящего звонка...")
-        QTimer.singleShot(100, lambda: self.setup_outgoing_media(call_id, username, call_window))
-            
+        # Создаём серверный сокет для аудио
+        audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
+        if not audio_socket:
+            logger.error(f"❌ Не удалось создать аудио-сокет для звонка {call_id}")
+            call_window.status_label.setText("❌ Ошибка: аудио не работает")
+        else:
+            # Запускаем поток ожидания клиентского сокета
+            def wait_for_client_socket():
+                client_sock = self.p2p_client.wait_for_call_socket(call_id, timeout=10)
+                if client_sock:
+                    logger.info(f"✅ Получен клиентский сокет для звонка {call_id}")
+                    # Передаём клиентский сокет в окно звонка
+                    call_window.set_call_socket(client_sock)
+                    # Если звонок ещё не запущен (кнопка не нажата), ничего страшного
+                    # set_call_socket сам вызовет аудио, когда is_active станет True
+                else:
+                    logger.error(f"❌ Не удалось получить клиентский сокет для звонка {call_id}")
+                    call_window.status_label.setText("❌ Ошибка: аудио не работает")
+            threading.Thread(target=wait_for_client_socket, daemon=True).start()
+
         # Показываем окно
-        call_window.show() 
+        call_window.show()
         call_window.raise_()
         call_window.activateWindow()
 
-        # Принудительно обновить отображение
-        QApplication.processEvents()
-        
-        logger.info(f"📞 Отображаем окно звонка для {username}, ID: {call_id}")
+        logger.info(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
         self.system_chat.append(f"📞 Отправлен запрос на {call_type} звонок пользователю {username}")
 
-        # Настраиваем медиа-соединение (после показа окна)
-        QTimer.singleShot(500, lambda: self.setup_outgoing_media(call_id, username, call_window))
-
-        # Дополнительно: через 2 секунды принудительно устанавливаем сокет
-        QTimer.singleShot(2000, lambda: self.setup_call_socket_for_window(call_id))
-
-        # Через 3 секунды еще раз проверяем
-        QTimer.singleShot(3000, lambda: self.force_setup_socket(call_id))
-        
     def setup_outgoing_media(self, call_id, username, call_window):
         """Настройка медиа для исходящего звонка"""
         try:
@@ -1294,36 +1319,29 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"❌ Ошибка настройки медиа для исходящего звонка: {e}")
 
     def accept_call(self, call_id):
-        """Принять входящий звонок"""
         try:
-            logger.info(f"=== ПОПЫТКА ПРИНЯТЬ ЗВОНОК {call_id} ===")
-
             if call_id not in self.active_calls:
-                logger.error(f"❌ Звонок {call_id} не найден в active_calls")
                 return
-
             call_info = self.active_calls[call_id]
             username = call_info['username']
             call_window = call_info['window']
-        
-            # 1. Отправляем подтверждение через P2P сеть
-            if self.p2p_client and self.p2p_client.send_call_response(call_id, 'accept'):
-                logger.info("✅ Подтверждение отправлено через P2P сеть")
-                
-                # Отправляем информацию о медиа-порте (сервер уже слушает на 9100)
-                self.p2p_client.send_media_info(call_id, username)
-                
-                # Запускаем окончательное принятие звонка
-                QTimer.singleShot(500, lambda: self._finalize_call_accept(call_id, call_window))
-            else:
-                logger.error("❌ Не удалось отправить подтверждение через P2P сеть")
-                self.system_chat.append("❌ Не удалось отправить подтверждение звонка")
-    
-        except Exception as e:
-            logger.error(f"❌ Критическая ошибка в accept_call: {e}")
-            import traceback
-            logger.error(f"Трассировка: {traceback.format_exc()}")
 
+            if self.p2p_client and self.p2p_client.send_call_response(call_id, 'accept'):
+                # Для входящего звонка сокет уже должен быть клиентским, но проверим
+                if hasattr(call_window, 'audio_core') and not call_window.audio_core.audio_socket:
+                    # Если сокета нет – пробуем получить ещё раз
+                    audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=False)
+                    if audio_socket:
+                        call_window.set_audio_socket(audio_socket)
+                # Запускаем звонок
+                if hasattr(call_window, 'start_call'):
+                    call_window.start_call()
+                self.system_chat.append(f"✅ Звонок {call_id} принят")
+            else:
+                QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить подтверждение звонка')
+        except Exception as e:
+            logger.error(f"Ошибка в accept_call: {e}")
+    
     def reject_call(self, call_id):
         """Отклонить входящий звонок"""
         try:
@@ -1791,20 +1809,12 @@ class P2PMainWindow(QMainWindow):
         """Обработка входящего видеозвонка"""
         try:
             logger.info(f"=== ОБРАБОТКА ВХОДЯЩЕГО ВИДЕОЗВОНКА {call_id} ОТ {from_user} ===")
-            
+
             # Получаем информацию о звонке из P2P клиента
             call_info = self.p2p_client.call_requests.get(call_id, {})
-            video_port = call_info.get('video_port')
             media_host = call_info.get('media_host')
-            
-            if not video_port or not media_host:
-                logger.error(f"❌ Не хватает данных для видео: video_port={video_port}, media_host={media_host}")
-                # Можно попробовать получить адрес пира из connected_peers
-                for peer_id, pinfo in self.p2p_client.connected_peers.items():
-                    if pinfo.get('username') == from_user:
-                        media_host = pinfo['address'][0]
-                        break
-            
+            video_port = call_info.get('video_port')
+
             # Чтение настроек видео
             settings = QSettings('DialogApp', 'P2PClient')
             camera_index = settings.value('video_camera_index', 0, type=int)
@@ -1813,30 +1823,31 @@ class P2PMainWindow(QMainWindow):
             fps = settings.value('video_fps', 30, type=int)
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
-                    
-            
 
-            # Создаем окно видеозвонка
-            video_window = VideoCallWindow(from_user, call_id, is_outgoing=False, parent=self,
-                                                                    camera_index=camera_index,
-                                                                    resolution=(res_w, res_h),
-                                                                    fps=fps,
-                                                                    quality=quality,
-                                                                    color_enhancement=color_enhancement,
-                                                                    input_device=self.audio_input_device, 
-                                                                    output_device=self.audio_output_device)
+            # Создаём окно видеозвонка
+            video_window = VideoCallWindow(
+                from_user, call_id, is_outgoing=False, parent=self,
+                camera_index=camera_index,
+                resolution=(res_w, res_h),
+                fps=fps,
+                quality=quality,
+                color_enhancement=color_enhancement,
+                input_device=self.audio_input_device,
+                output_device=self.audio_output_device
+            )
             video_window.call_ended.connect(self.end_call)
             video_window.call_accepted.connect(self.accept_call)
             video_window.call_rejected.connect(self.reject_call)
-            
 
-            # Аудио‑сокет (входящий)
+            # ===== АУДИО: для входящего звонка создаём клиентский сокет (подключаемся к пиру) =====
             audio_socket = self.p2p_client.setup_call_connection(call_id, from_user, is_outgoing=False)
             if audio_socket:
                 video_window.set_audio_socket(audio_socket)
+                logger.info(f"✅ Аудио-сокет для входящего звонка {call_id} установлен")
+            else:
+                logger.error(f"❌ Не удалось создать аудио-сокет для входящего звонка {call_id}")
+                video_window.status_label.setText("❌ Ошибка: аудио не работает")
 
-
-            
             # Сохраняем информацию о звонке
             self.active_calls[call_id] = {
                 'window': video_window,
@@ -1846,13 +1857,12 @@ class P2PMainWindow(QMainWindow):
                 'status': 'incoming'
             }
 
-            
             # Показываем окно
             video_window.show()
             video_window.raise_()
             video_window.activateWindow()
 
-            # Функция для ожидания появления video_port и подключения
+            # Функция для подключения видео (как было раньше)
             def try_connect_video(attempt=0):
                 if attempt >= 10:
                     logger.error(f"❌ Не удалось подключиться к видео после 10 попыток")
@@ -1863,18 +1873,17 @@ class P2PMainWindow(QMainWindow):
                 video_port = call_info.get('video_port')
                 media_host = call_info.get('media_host')
 
-                # Если media_host не передан, пробуем получить из connected_peers
                 if not media_host:
                     for peer_id, pinfo in self.p2p_client.connected_peers.items():
                         if pinfo.get('username') == from_user:
                             media_host = pinfo['address'][0]
                             break
-                
+
                 if not video_port or not media_host:
                     logger.warning(f"⚠️ Попытка {attempt+1}: video_port={video_port}, media_host={media_host}, повтор через 0.5 сек")
                     QTimer.singleShot(500, lambda: try_connect_video(attempt+1))
                     return
-                
+
                 try:
                     video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     video_socket.settimeout(5.0)
@@ -1885,16 +1894,15 @@ class P2PMainWindow(QMainWindow):
                 except Exception as e:
                     logger.warning(f"⚠️ Попытка {attempt+1}: не удалось подключиться к видео: {e}")
                     QTimer.singleShot(1000, lambda: try_connect_video(attempt+1))
-                
-            # Запускаем подключение с задержкой, чтобы инициатор успел запустить сервер
+
             QTimer.singleShot(100, lambda: try_connect_video(0))
-            
-            # Показываем уведомление
+
+            # Уведомление
             self.show_notification(
                 f"📹 Входящий видеозвонок",
                 f"Пользователь {from_user} звонит вам с видео"
             )
-        
+
             logger.info(f"✅ Окно видеозвонка {call_id} показано")
             self.system_chat.append(f"📹 Входящий видеозвонок от {from_user}")
 
@@ -1903,12 +1911,11 @@ class P2PMainWindow(QMainWindow):
             self.system_chat.append(f"❌ Ошибка создания окна видеозвонка: {e}")
 
     def start_video_call(self, username):
-        """Начать видеозвонок с пользователем"""
+        """Начать видеозвонок с пользователем (исходящий)"""
         # Отладочная информация
         online_users = self.p2p_client.get_online_users()
         logger.info(f"Онлайн пользователи перед видеозвонком: {[u['username'] for u in online_users]}")
-    
-        # Проверим, есть ли пользователь
+
         if not any(u['username'] == username for u in online_users):
             QMessageBox.warning(self, 'Ошибка', f'Пользователь {username} не в сети')
             return
@@ -1925,44 +1932,48 @@ class P2PMainWindow(QMainWindow):
         fps = settings.value('video_fps', 30, type=int)
         quality = settings.value('video_quality', 85, type=int)
         color_enhancement = settings.value('video_color_enhancement', True, type=bool)
-                
+
         # Отправляем запрос на видеозвонок
         call_id = self.p2p_client.send_call_request(username, 'video')
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на видеозвонок')
             return
 
-        # Создаем окно видеозвонка
-        video_window = VideoCallWindow(username, call_id, is_outgoing=True, parent=self,
-                                                camera_index=camera_index,
-                                                resolution=(res_w, res_h),
-                                                fps=fps,
-                                                quality=quality,
-                                                color_enhancement=color_enhancement,
-                                                input_device=self.audio_input_device, 
-                                                output_device=self.audio_output_device)
+        # Создаём окно видеозвонка
+        video_window = VideoCallWindow(
+            username, call_id, is_outgoing=True, parent=self,
+            camera_index=camera_index,
+            resolution=(res_w, res_h),
+            fps=fps,
+            quality=quality,
+            color_enhancement=color_enhancement,
+            input_device=self.audio_input_device,
+            output_device=self.audio_output_device
+        )
         video_window.call_ended.connect(self.end_call)
-        
-        # Подключаем сигнал готовности видео-сокета
+
+        # Подключаем сигнал готовности видео-сокета (если нужно)
         self.p2p_client.video_socket_ready.connect(self.on_video_socket_ready)
-        
-        # Получаем сокет для видео
+
+        # Получаем серверный сокет для видео (или None)
         video_socket = self.p2p_client.setup_video_connection(call_id, username)
-        
         if video_socket:
-            logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
             video_window.set_video_socket(video_socket)
+            logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
         else:
             logger.warning(f"⚠️ Не удалось получить видео-сокет для звонка {call_id}")
             self.system_chat.append(f"⚠️ Видеозвонок начат, но видео соединение не установлено")
 
-
-        # Аудио‑сокет
+        # ===== АУДИО: создаём серверный сокет и запускаем ожидание клиентского подключения =====
         audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
         if audio_socket:
-            video_window.set_audio_socket(audio_socket)
-        
-        
+            # Для исходящего звонка audio_socket – это серверный сокет.
+            # Запускаем фоновое ожидание, когда он примет входящее соединение.
+            self._set_audio_socket_with_retry(video_window, call_id, timeout=5)
+        else:
+            logger.error(f"❌ Не удалось создать аудио-сокет для звонка {call_id}")
+            video_window.status_label.setText("❌ Ошибка: аудио не работает")
+
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
             'window': video_window,
@@ -1971,15 +1982,24 @@ class P2PMainWindow(QMainWindow):
             'outgoing': True,
             'status': 'pending'
         }
-    
+
         # Показываем окно
         video_window.show()
         video_window.raise_()
         video_window.activateWindow()
-        
+
         logger.info(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
         self.system_chat.append(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
 
+    def _retry_audio_socket(self, video_window, call_id, username, is_outgoing):
+        audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=is_outgoing)
+        if audio_socket:
+            video_window.set_audio_socket(audio_socket)
+            logger.info(f"Аудио-сокет для {call_id} успешно создан с повторной попытки")
+        else:
+            logger.warning(f"Не удалось создать аудио-сокет для {call_id} после повторной попытки")
+        
+    
     def handle_call_accepted(self, from_user, call_id):
         logger.info(f"🔊 Звонок принят пользователем {from_user}")
         with self.calls_lock:
