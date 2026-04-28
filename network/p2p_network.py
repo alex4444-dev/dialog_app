@@ -78,7 +78,7 @@ class P2PNetworkClient(QObject):
     connection_status_changed = pyqtSignal(str)
     call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
     video_socket_ready = pyqtSignal(str, object)
-    
+        
     def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()
         self.db = db
@@ -91,7 +91,7 @@ class P2PNetworkClient(QObject):
         self.peer_exchange_interval = 30  # секунды между обменами
         self.last_peer_exchange = 0
         self.peers_lock = threading.Lock()
-
+        self.active_audio_calls = {}  # call_id -> peer_id
         self.media_ports = set()  # Для отслеживания используемых медиа-портов
         
         # Bootstrap узлы: если переданы, используем их, иначе пустой список
@@ -395,6 +395,11 @@ class P2PNetworkClient(QObject):
                 break
 
         if existing_peer:
+            # Проверяем, не занят ли existing_peer в активном звонке
+            # active_audio_calls: {call_id: peer_id}
+            if any(peer_id == existing_peer for peer_id in self.active_audio_calls.values()):
+                logger.warning(f"Пир {existing_peer} имеет активный звонок – не закрываем")
+                return
             logger.warning(f"⚠️ Обнаружен дубликат пользователя {username}: {existing_peer} и {peer_id}")
             try:
                 self.connected_peers[existing_peer]['socket'].close()
@@ -411,8 +416,7 @@ class P2PNetworkClient(QObject):
         online_users = self.get_online_users()
         self.user_list_updated.emit(online_users)
         logger.info(f"📊 Обновлен список пользователей: {len(online_users)} пользователей онлайн")
-
-
+    
     def get_peers_from_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
         """Синхронное получение списка пиров от bootstrap сервера"""
         try:
@@ -954,9 +958,16 @@ class P2PNetworkClient(QObject):
             peer_username = peer_info.get('username', 'unknown')
 
             if current_time - peer_info.get('last_seen', 0) > 60:
-                logger.info(f"🔌 Пир {peer_username} ({peer_id}) отключен по таймауту")
-                disconnected_peers.append(peer_id)
+                # Проверяем, есть ли активный звонок, использующий этого пира
+                call_active = any(pid == peer_id for pid in self.active_audio_calls.values())
+                if not call_active:
+                    logger.info(f"🔌 Пир {peer_username} ({peer_id}) отключен по таймауту")
+                    disconnected_peers.append(peer_id)                   
             else:
+                # Обновляем last_seen, чтобы пир не отключался
+                peer_info['last_seen'] = current_time
+                logger.debug(f"Пир {peer_id} участвует в звонке – таймаут пропущен")
+
                 if current_time - peer_info.get('last_seen', 0) > 30:
                     try:
                         ping_data = {'type': 'ping', 'timestamp': current_time}
@@ -978,6 +989,9 @@ class P2PNetworkClient(QObject):
             peer_info = self.connected_peers[peer_id]
             username = peer_info.get('username', 'unknown')
 
+            if peer_id in self.active_audio_calls.values():
+                logger.warning(f"Пир {peer_id} участвует в активном звонке – не удаляем")
+                return
             # Закрываем сокет (под блокировкой – безопасно)
             try:
                 peer_info['socket'].close()
@@ -1184,12 +1198,15 @@ class P2PNetworkClient(QObject):
 
             # Сохраняем серверный сокет в media_sockets
             self.media_sockets[call_id] = server_socket
-
+            
             # Запускаем поток для ожидания подключения
             threading.Thread(target=self._wait_for_call_connection, args=(call_id, server_socket), daemon=True).start()
-
+            peer_id = f"{peer_host}:{peer_port}"
+            self.active_audio_calls[call_id] = peer_id
+            
             return server_socket
 
+           
         except Exception as e:
             logger.error(f"❌ [_create_outgoing_call_socket] Звонок {call_id}: ошибка: {e}")
             return None
@@ -1210,7 +1227,10 @@ class P2PNetworkClient(QObject):
                     resp = json.loads(resp_data.decode())
                     if resp.get('status') == 'connected' and resp.get('call_id') == call_id:
                         logger.info(f"✅ Соединение для звонка {call_id} установлено")
+                        peer_id = f"{peer_host}:{peer_port}"
+                        self.active_audio_calls[call_id] = peer_id
                         return client_socket
+
                 client_socket.close()
             except Exception as e:
                 logger.warning(f"Попытка {attempt+1} не удалась: {e}")
@@ -1605,8 +1625,11 @@ class P2PNetworkClient(QObject):
         
             # Если нашли дубликат (пользователь с таким именем уже подключен под другим peer_id)
             if existing_peer:
-                logger.warning(f"⚠️ Обнаружен дубликат пользователя {username}: {existing_peer} и {peer_id}")
-                # Закрываем старое соединение
+                # Если старый пир участвует в звонке – не трогать
+                if existing_peer in self.active_audio_calls:
+                    logger.warning(f"Пир {existing_peer} имеет активный звонок – не закрываем")
+                    return
+                # Иначе закрыть старый сокет
                 try:
                     self.connected_peers[existing_peer]['socket'].close()
                 except:
@@ -2425,32 +2448,36 @@ class P2PNetworkClient(QObject):
     def close_media_connection(self, call_id: str):
         """Закрытие медиа-соединения для звонка"""
         logger.info(f"🔊 close_media_connection: call_id={call_id}")
-        """Закрытие медиа-соединения для звонка"""
         try:
+            # 1. Закрываем сокет, если он есть
             if call_id in self.media_sockets:
                 media_socket = self.media_sockets[call_id]
                 if media_socket:
                     try:
-                        # Отправляем сообщение о завершении звонка
+                        # Отправляем уведомление о завершении звонка
                         end_data = {'call_id': call_id, 'action': 'end'}
                         media_socket.send(json.dumps(end_data).encode())
                     except:
                         pass
-
-                    # Закрываем сокет
                     media_socket.close()
                     logger.info(f"🔌 Медиа-соединение для звонка {call_id} закрыто")
-                    if call_id in self.media_connections:
-                        del self.media_connections[call_id]
-                    if call_id in self.call_requests:
-                        del self.call_requests[call_id]
 
-                # Удаляем из словарей
+            # 2. Удаляем из всех вспомогательных словарей
+            if call_id in self.media_connections:
+                del self.media_connections[call_id]
+            if call_id in self.call_requests:
+                del self.call_requests[call_id]
+            if call_id in self.media_sockets:
                 del self.media_sockets[call_id]
+
+            # 3. КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: удаляем call_id из набора активных звонков
+            if call_id in self.active_audio_calls:
+                del self.active_audio_calls[call_id]
+                logger.debug(f"Активный звонок {call_id} удалён из active_audio_calls")
 
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия медиа-соединения: {e}")
-
+        
     @property
     def connected(self):
         """Свойство для обратной совместимости"""
