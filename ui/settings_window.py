@@ -327,27 +327,26 @@ class VideoSettingsPage(QWidget):
 
         self.resolution_combo = QComboBox()
         resolutions = [
+            ("160x120", 160, 120),
             ("320x240", 320, 240),
-            ("640x480", 640, 480),
-            ("800x600", 800, 600),
-            ("1280x720", 1280, 720)
+            ("640x480", 640, 480)           
         ]
         for name, w, h in resolutions:
             self.resolution_combo.addItem(name, (w, h))
         form_layout.addRow("Разрешение:", self.resolution_combo)
 
         self.fps_combo = QComboBox()
-        fps_options = [(f"{f} FPS", f) for f in [15, 30, 60]]
+        fps_options = [(f"{f} FPS", f) for f in [5, 10, 15, 30]]
         for name, f in fps_options:
             self.fps_combo.addItem(name, f)
         form_layout.addRow("Частота кадров:", self.fps_combo)
 
         self.quality_combo = QComboBox()
         qualities = [
-            ("Низкое (60)", 60),
-            ("Среднее (75)", 75),
-            ("Высокое (90)", 90),
-            ("Оригинальное (95)", 95)
+            ("Низкое (40)", 40),
+            ("Среднее (60)", 60),
+            ("Высокое (75)", 75),
+            ("Оригинальное (85)", 85)
         ]
         for name, q in qualities:
             self.quality_combo.addItem(name, q)
@@ -428,8 +427,8 @@ class VideoSettingsPage(QWidget):
             if idx >= 0:
                 self.camera_combo.setCurrentIndex(idx)
 
-        res_w = settings.value('video_resolution_width', 640, type=int)
-        res_h = settings.value('video_resolution_height', 480, type=int)
+        res_w = settings.value('video_resolution_width', 320, type=int)
+        res_h = settings.value('video_resolution_height', 240, type=int)
         self.resolution = (res_w, res_h)
         for i in range(self.resolution_combo.count()):
             w, h = self.resolution_combo.itemData(i)
@@ -437,13 +436,13 @@ class VideoSettingsPage(QWidget):
                 self.resolution_combo.setCurrentIndex(i)
                 break
 
-        self.fps = settings.value('video_fps', 30, type=int)
+        self.fps = settings.value('video_fps', 15, type=int)
         for i in range(self.fps_combo.count()):
             if self.fps_combo.itemData(i) == self.fps:
                 self.fps_combo.setCurrentIndex(i)
                 break
 
-        self.quality = settings.value('video_quality', 85, type=int)
+        self.quality = settings.value('video_quality', 60, type=int)
         for i in range(self.quality_combo.count()):
             if self.quality_combo.itemData(i) == self.quality:
                 self.quality_combo.setCurrentIndex(i)
@@ -712,15 +711,34 @@ class SettingsDialog(QDialog):
         self.nav_list.currentItemChanged.connect(self.on_nav_changed)
 
         # Кнопки диалога
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel | QDialogButtonBox.Apply)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        button_box.button(QDialogButtonBox.Apply).clicked.connect(self.apply_settings)
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+        button_layout.addStretch()  
+
+        # Создаём кнопки
+        btn_ok = QPushButton("OK")
+        btn_cancel = QPushButton("Отмена")
+        btn_apply = QPushButton("Применить")
+
+        # Задаём размеры кнопок (опционально)
+        btn_ok.setFixedWidth(80)
+        btn_cancel.setFixedWidth(120)
+        btn_apply.setFixedWidth(150)
+
+        # Добавляем кнопки в layout в нужном порядке
+        button_layout.addWidget(btn_ok)
+        button_layout.addWidget(btn_cancel)
+        button_layout.addWidget(btn_apply)
+
+        # Подключаем сигналы
+        btn_ok.clicked.connect(self.accept)
+        btn_cancel.clicked.connect(self.reject)
+        btn_apply.clicked.connect(self.apply_settings)
 
         # Добавляем кнопки внизу (под стеком, на всю ширину)
         right_layout = QVBoxLayout()
         right_layout.addWidget(self.stacked_widget)
-        right_layout.addWidget(button_box)
+        right_layout.addLayout(button_layout)
 
         # Заменяем правую часть: удаляем старый stacked_widget и добавляем right_layout
         main_layout.removeWidget(self.stacked_widget)

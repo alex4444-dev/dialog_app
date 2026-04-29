@@ -51,6 +51,7 @@ class VideoCaptureThread(QThread):
                 return
             
             # Настраиваем параметры камеры
+            self.camera.set(cv2.CAP_PROP_BUFFERSIZE, 1)   # уменьшаем буфер камеры
             self.camera.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
             self.camera.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
             self.camera.set(cv2.CAP_PROP_FPS, self.fps)
@@ -234,8 +235,8 @@ class VideoProcessor:
         """Обработка одного кадра"""
         try:
             # Изменение размера если нужно
-            target_width = 640
-            target_height = 480
+            target_width = 320
+            target_height = 240
             
             h, w = frame.shape[:2]
             if w != target_width or h != target_height:
@@ -326,7 +327,7 @@ class VideoCallWindow(QWidget):
     video_toggled = pyqtSignal(bool)
     
     def __init__(self, username, call_id, is_outgoing=True, parent=None,
-                 camera_index=0, resolution=(640,480), fps=30, quality=85, color_enhancement=True,
+                 camera_index=0, resolution=(320,240), fps=15, quality=60, color_enhancement=True,
                  input_device=None, output_device=None):
         super().__init__(parent)
         self.username = username
