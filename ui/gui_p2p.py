@@ -105,8 +105,8 @@ class P2PMainWindow(QMainWindow):
         self.sig_call_status.connect(self.on_call_status)
         self.chat_windows = {}
 
-        if hasattr(self.p2p_client, 'message_received'):
-            self.p2p_client.message_received.connect(self.handle_received_message)
+        #if hasattr(self.p2p_client, 'message_received'):
+        #    self.p2p_client.message_received.connect(self.handle_received_message)
 
         self.init_ui()      
     
@@ -177,18 +177,41 @@ class P2PMainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка", f"Не удалось открыть окно настроек:\n{e}")
 
     def on_settings_changed(self, settings):
-        """Обновить настройки приложения"""
-        print(f"DEBUG: on_settings_changed получил: {type(settings)} -> {settings}")
+        """Обновляет настройки аудио в главном окне и во всех активных звонках"""
         if not isinstance(settings, dict):
+            logger.warning("on_settings_changed: передан некорректный объект, ожидался dict")
             return
-        self.audio_input_device = settings.get('input_device')
-        self.audio_output_device = settings.get('output_device')
-        self.settings.setValue('audio_input_device', self.audio_input_device)
-        self.settings.setValue('audio_output_device', self.audio_output_device)
-        self.settings.sync()  # принудительная запись на диск
-        logger.info(f"Главное окно: обновлены настройки: ввод={self.audio_input_device}, вывод={self.audio_output_device}")
-        # TODO: оповестить активные звонки, если нужно
-        
+
+        new_input = settings.get('input_device')
+        new_output = settings.get('output_device')
+
+        # Обновляем в главном окне
+        self.audio_input_device = new_input
+        self.audio_output_device = new_output
+
+        # Сохраняем в QSettings
+        self.settings.setValue('audio_input_device', new_input)
+        self.settings.setValue('audio_output_device', new_output)
+        self.settings.sync()
+
+        logger.info(f"Главное окно: обновлены настройки аудио: ввод={new_input}, вывод={new_output}")
+
+        # Обновляем устройства во всех активных окнах звонков
+        updated_count = 0
+        for call_id, info in self.active_calls.items():
+            window = info.get('window')
+            if window:
+                window.input_device = new_input
+                window.output_device = new_output
+                logger.debug(f"Звонок {call_id}: устройства обновлены (ввод={new_input}, вывод={new_output})")
+                updated_count += 1
+
+        if updated_count > 0:
+            logger.info(f"Настройки аудио переданы в {updated_count} активных звонков. "
+                        "Для применения изменений может потребоваться перезапуск звонка.")
+        else:
+            logger.info("Активных звонков нет, настройки сохранены.")
+
     def _finalize_call_accept(self, call_id, call_window):
         """Завершающая стадия принятия звонка"""
         try:
@@ -426,13 +449,12 @@ class P2PMainWindow(QMainWindow):
         if not self.isActiveWindow() or self.isMinimized():
             self.show_notification(f"💬 Новое сообщение от {username}", message)
             
-        if username not in self.active_chats:
-            logger.info(f"P2PMainWindow.handle_message: Чат с {username} не открыт, открываем...")
+        if username not in self.chat_windows:
             self.open_chat(username)
         
-        if username in self.active_chats:
+        if username in self.chat_windows:
             logger.info(f"P2PMainWindow.handle_message: Добавление сообщения в чат с {username}")
-            chat_window = self.active_chats[username]
+            chat_window = self.chat_windows[username]
             
             if chat_window and hasattr(chat_window, 'add_message'):
                 current_index = self.tabs.currentIndex()
@@ -710,64 +732,45 @@ class P2PMainWindow(QMainWindow):
         """Открытие чата с пользователем"""
         try:
             logger.info(f"P2PMainWindow.open_chat: Начало открытия чата с {username}")
-            
-            # Очищаем имя пользователя от лишних символов
-            clean_username = username.replace("👤 ", "").replace("💬 ", "").strip()
-            
 
-            # Создаем уникальный ключ пользователя
-            if host and port:
-                user_key = f"{clean_username}_{host}_{port}"
-            else:
-                user_key = clean_username
-                
-            logger.info(f"P2PMainWindow.open_chat: Открытие чата с {clean_username} ({host}:{port}), ключ: {user_key}")
-            
-            # Проверяем, открыт ли уже чат с этим пользователем
+            # Очищаем имя от возможных лишних символов
+            clean_username = username.replace("👤 ", "").replace("💬 ", "").strip()
+
+            # КЛЮЧ – ТОЛЬКО ИМЯ ПОЛЬЗОВАТЕЛЯ, без IP:порта
+            user_key = clean_username
+
+            # Если чат с таким именем уже открыт – просто активируем вкладку
             if user_key in self.chat_windows:
                 chat_window = self.chat_windows[user_key]
-                # Активируем существующую вкладку
                 index = self.tabs.indexOf(chat_window)
                 if index >= 0:
                     self.tabs.setCurrentIndex(index)
                     chat_window.set_active(True)
                 logger.info(f"P2PMainWindow.open_chat: Чат с {clean_username} уже открыт")
                 return
-        
-            # Создаем новый чат
+
+            # Создаём новый чат (host и port передаются только для информации, если нужны)
             logger.info(f"P2PMainWindow.open_chat: Создание нового чата с {clean_username}")
-            
-            # Передаем все три параметра в ChatWindow
             chat_window = ChatWindow(clean_username, host, port)
-            logger.info(f"P2PMainWindow.open_chat: ChatWindow создан успешно")
-            
+
             # Подключаем сигналы
-            logger.info(f"P2PMainWindow.open_chat: Подключение сигналов...")
             chat_window.message_sent.connect(self.on_message_sent)
-            logger.info(f"P2PMainWindow.open_chat: Сигнал message_sent подключен")
             chat_window.unread_count_changed.connect(self.on_unread_count_changed)
-            logger.info(f"P2PMainWindow.open_chat: Сигнал unread_count_changed подключен")
             chat_window.call_requested.connect(self.on_call_requested)
-            logger.info(f"P2PMainWindow.open_chat: Сигнал call_requested подключен")
-            
+
             # Добавляем вкладку
             tab_index = self.tabs.addTab(chat_window, f"💬 {clean_username}")
             self.tabs.setCurrentIndex(tab_index)
-            logger.info(f"P2PMainWindow.open_chat: Вкладка добавлена, индекс: {tab_index}")
-            
-            # Сохраняем ссылку в словаре chat_windows
+
+            # Сохраняем в общий словарь окон чатов
             self.chat_windows[user_key] = chat_window
-            logger.info(f"P2PMainWindow.open_chat: Чат сохранен в chat_windows, всего чатов: {len(self.chat_windows)}")
-            
-            # НЕ подключаем здесь обработчик изменения вкладки - он уже подключен в init_ui
-            # self.tabs.currentChanged.connect(...)  # УДАЛИТЬ ЭТУ СТРОКУ!
-            
-            logger.info(f"P2PMainWindow.open_chat: Чат с {clean_username} успешно создан")
-            
+
+            logger.info(f"P2PMainWindow.open_chat: Чат с {clean_username} успешно создан (ключ: {user_key})")
+
         except Exception as e:
             logger.error(f"P2PMainWindow.open_chat: Ошибка открытия чата: {e}")
             import traceback
-            logger.error(f"P2PMainWindow.open_chat: Трассировка: {traceback.format_exc()}")
+            logger.error(traceback.format_exc())
 
     def on_tab_changed(self, index):
         """Обработчик изменения активной вкладки"""
@@ -794,21 +797,27 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.on_tab_changed: Ошибка: {e}")
 
     def close_chat_tab(self, index):
-        """Закрытие вкладки чата"""
         if index == 0:  # Не закрываем системную вкладку
             return
             
         widget = self.tabs.widget(index)
-        tab_text = self.tabs.tabText(index)
-        
-        username = tab_text.replace("💬 ", "")
-        
-        if username in self.active_chats:
-            del self.active_chats[username]
+        if widget is None:
+            return
+        username = None
+        # Получаем имя пользователя из атрибута виджета
+        if hasattr(widget, 'username'):
+            username = widget.username
+    
+        # Удаляем из словарей
+        if username:
+            if username in self.active_chats:
+                del self.active_chats[username]
+            if username in self.chat_windows:
+                del self.chat_windows[username]
             logger.info(f"P2PMainWindow.close_chat_tab: Закрыт чат с {username}")
-            
-        self.tabs.removeTab(index)
         
+        self.tabs.removeTab(index)
+
     def update_tab_title(self, username, unread_count):
         """Обновление заголовка вкладки с непрочитанными"""
         for i in range(self.tabs.count()):
@@ -1254,24 +1263,21 @@ class P2PMainWindow(QMainWindow):
         }
 
         # Создаём серверный сокет для аудио
-        audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
-        if not audio_socket:
-            logger.error(f"❌ Не удалось создать аудио-сокет для звонка {call_id}")
-            call_window.status_label.setText("❌ Ошибка: аудио не работает")
-        else:
-            # Запускаем поток ожидания клиентского сокета
-            def wait_for_client_socket():
-                client_sock = self.p2p_client.wait_for_call_socket(call_id, timeout=10)
-                if client_sock:
-                    logger.info(f"✅ Получен клиентский сокет для звонка {call_id}")
-                    # Передаём клиентский сокет в окно звонка
-                    call_window.set_call_socket(client_sock)
-                    # Если звонок ещё не запущен (кнопка не нажата), ничего страшного
-                    # set_call_socket сам вызовет аудио, когда is_active станет True
-                else:
-                    logger.error(f"❌ Не удалось получить клиентский сокет для звонка {call_id}")
-                    call_window.status_label.setText("❌ Ошибка: аудио не работает")
-            threading.Thread(target=wait_for_client_socket, daemon=True).start()
+        self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
+        
+        # Запускаем поток ожидания клиентского сокета
+        def wait_for_client_socket():
+            client_sock = self.p2p_client.wait_for_call_socket(call_id, timeout=10)
+            if client_sock:
+                logger.info(f"✅ Получен клиентский сокет для звонка {call_id}")
+                # Передаём клиентский сокет в окно звонка
+                call_window.set_call_socket(client_sock)
+                # Если звонок ещё не запущен (кнопка не нажата), ничего страшного
+                # set_call_socket сам вызовет аудио, когда is_active станет True
+            else:
+                logger.error(f"❌ Не удалось получить клиентский сокет для звонка {call_id}")
+                call_window.status_label.setText("❌ Ошибка: аудио-сокет не работает")
+        threading.Thread(target=wait_for_client_socket, daemon=True).start()
 
         # Показываем окно
         call_window.show()
@@ -1765,11 +1771,19 @@ class P2PMainWindow(QMainWindow):
                 )
             
                 if call_socket:
-                    logger.info(f"✅ Сокет для входящего звонка {call_id} создан")
+                    logger.info(f"✅ Получен сокет типа {type(call_socket)} для звонка {call_id}")
+                    # проверяем, не серверный ли он
+                    try:
+                        logger.info(f"   is_client={not bool(call_socket.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN))}")
+                    except:
+                        pass
                     self.call_sockets[call_id] = call_socket
                     # Устанавливаем сокет в окне
                     success = call_window.set_call_socket(call_socket)
                     if success:
+                        # Убедимся, что приёмник запущен сразу (вдруг окно уже активно)
+                        if call_window.is_active and not call_window.audio_initialized:
+                            call_window.initialize_audio_streams()
                         logger.info(f"✅ Сокет установлен в окне звонка {call_id}")
                     else:
                         logger.error(f"❌ Не удалось установить сокет в окне звонка {call_id}")
@@ -1965,15 +1979,12 @@ class P2PMainWindow(QMainWindow):
             self.system_chat.append(f"⚠️ Видеозвонок начат, но видео соединение не установлено")
 
         # ===== АУДИО: создаём серверный сокет и запускаем ожидание клиентского подключения =====
-        audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
-        if audio_socket:
-            # Для исходящего звонка audio_socket – это серверный сокет.
-            # Запускаем фоновое ожидание, когда он примет входящее соединение.
-            self._set_audio_socket_with_retry(video_window, call_id, timeout=5)
-        else:
-            logger.error(f"❌ Не удалось создать аудио-сокет для звонка {call_id}")
-            video_window.status_label.setText("❌ Ошибка: аудио не работает")
-
+        self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
+        
+        # Для исходящего звонка audio_socket – это серверный сокет.
+        # Запускаем фоновое ожидание, когда он примет входящее соединение.
+        self._set_audio_socket_with_retry(video_window, call_id, timeout=5)
+        
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {
             'window': video_window,

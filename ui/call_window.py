@@ -14,6 +14,8 @@ import socket
 import numpy as np
 import json
 
+MAX_AUDIO_PACKET_SIZE = 65536  # до 4096 сэмплов float32
+        
 
 logger = logging.getLogger('dialog_gui')
 
@@ -51,10 +53,10 @@ class CallWindow(QWidget):
         self.sample_rate = 44100
         self.channels = 1
         self.dtype = 'float32'
-        self.blocksize = 2048
+        self.blocksize = 4096
         
         # Буфер для аудио данных
-        self.audio_buffer = queue.Queue(maxsize=20)
+        self.audio_buffer = queue.Queue(maxsize=100)
         
         # Счетчики для диагностики
         self.sent_packets = 0
@@ -68,6 +70,7 @@ class CallWindow(QWidget):
         self.max_socket_attempts = 3
         
         # Флаги для отслеживания состояния
+        self.secure_mode = False
         self.audio_receiver_running = False
         self.audio_receiver_thread = None
         self.local_mode = False
@@ -343,20 +346,27 @@ class CallWindow(QWidget):
             self.send_audio_data(indata)
 
     def set_call_socket(self, call_socket):
-        """Установка клиентского сокета для звонка(исходящие)"""
         try:
             if call_socket is None:
                 return False
+            # Определяем тип сокета
+            if hasattr(call_socket, 'recv') and hasattr(call_socket, 'send'):
+                # Это может быть как обычный socket, так и SecureChannel
+                # Если у объекта есть метод fileno() и он возвращает int, то это обычный socket
+                if hasattr(call_socket, 'fileno'):
+                    self.secure_mode = False
+                else:
+                    # Предполагаем, что это SecureChannel (у него нет fileno)
+                    self.secure_mode = True
             self.call_socket = call_socket
             self.socket_set = True
             self.local_mode = False
             self.status_label.setText("🟢 Соединение установлено")
-            # Если звонок уже активен, инициализируем аудио
             if self.is_active and not self.audio_initialized:
                 QTimer.singleShot(100, self._do_start_call)
-            return True                     
+            return True
         except Exception as e:
-            logger.error(f"❌ Ошибка установки сокета: {e}")
+            logger.error(f"Ошибка установки сокета: {e}")
             return False
 
     def auto_check_socket(self):
@@ -687,7 +697,7 @@ class CallWindow(QWidget):
             
             # Пробуем разные конфигурации
             configs = [
-                {'samplerate': 44100, 'blocksize': 1024},
+                {'samplerate': 44100, 'blocksize': 4096},
                 {'samplerate': 22050, 'blocksize': 512},
                 {'samplerate': 16000, 'blocksize': 256},
             ]
@@ -706,7 +716,9 @@ class CallWindow(QWidget):
                     def output_callback(outdata, frames, time, status):
                         if status:
                             logger.debug(f"Аудио выходной статус: {status}")
-                
+                        if self.received_packets == 0:
+                            logger.info("🔔 output_callback вызван впервые")
+                        self.received_packets += 1
                         try:
                             # Получаем данные из буфера
                             audio_data = self.get_audio_data(frames)
@@ -740,16 +752,19 @@ class CallWindow(QWidget):
                         dtype=np.float32
                     )
 
-                    # Запускаем потоки
-                    self.input_stream.start()
-                    self.output_stream.start()
-                    
                     # Обновляем параметры
                     self.sample_rate = config['samplerate']
                     self.blocksize = config['blocksize']
                     
                     self.audio_initialized = True
                     logger.info(f"✅ Аудио потоки успешно инициализированы с конфигурацией: {config}")
+                    
+                    
+                    # Запускаем потоки
+                    self.input_stream.start()
+                    self.output_stream.start()
+                    
+                    
                     
                     # ✅ ЗАПУСКАЕМ ПРИЕМНИК ДАННЫХ ПОСЛЕ УСПЕШНОЙ ИНИЦИАЛИЗАЦИИ
                     self.start_audio_receiver()
@@ -894,109 +909,137 @@ class CallWindow(QWidget):
             return None
 
     def send_audio_data(self, audio_data):
-        """Отправка аудио данных"""
         if self.muted:
             return False
-
         try:
             if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
                 return False
-            try:
-                self.call_socket.fileno()
-            except (OSError, ValueError):
-                logger.debug("Сокет закрыт, прекращаем отправку")
-                self.is_active = False
-                return False
-
-            # Если передан numpy array, конвертируем в байты
             if isinstance(audio_data, np.ndarray):
-                audio_data = audio_data.tobytes()
+                raw = audio_data.tobytes()
+            else:
+                raw = bytes(audio_data)
 
-            # Формируем пакет: заголовок (длина) + данные
-            header = struct.pack('!I', len(audio_data))
-            full_data = header + audio_data
+            header = struct.pack('!I', len(raw))
+            packet = header + raw
 
-            sent = self.call_socket.send(full_data)
-            if sent:
-                self.sent_packets += 1
-                if self.sent_packets % 50 == 0:
-                    logger.debug(f"🎤 Отправлено пакетов: {self.sent_packets}")
-            return sent > 0
-
-        except (BrokenPipeError, ConnectionResetError, OSError) as e:
-            logger.debug(f"Сокет закрыт при отправке: {e}")
-            self.is_active = False
+            if self.secure_mode:
+                self.call_socket.send(packet)
+            else:
+                self.call_socket.sendall(packet)
+            self.sent_packets += 1
+            if self.sent_packets % 50 == 0:
+                logger.info(f"✅ Отправлен аудио-пакет #{self.sent_packets} ({len(packet)} байт)")
+            return True
+        except BrokenPipeError:
+            logger.warning("🔌 send_audio_data: соединение разорвано")
             return False
-        except Exception as e:
-            logger.debug(f"Ошибка отправки аудио данных: {e}")
+        except ConnectionResetError:
+            logger.warning("🔌 send_audio_data: соединение сброшено")
             return False
-
-    def receive_audio_data(self):
-        """Прием аудио данных из сокета с буферизацией"""
-        try:
-            if not self.call_socket or not self.is_active or not self.audio_initialized or self.local_mode:
-                return
-                    # Проверим, что сокет ещё жив
-            try:
-                self.call_socket.fileno()
-            except (OSError, ValueError):
-                logger.debug("Сокет закрыт, выходим")
-                self.is_active = False
-                return
-            
-            # Устанавливаем небольшой таймаут
-            self.call_socket.settimeout(0.5)
-
-            chunk = self.call_socket.recv(4096)
-            if not chunk:
-                return
-
-            self._recv_buffer += chunk
-
-            # Разбираем все полные пакеты
-            while len(self._recv_buffer) >= 4:
-                data_size = struct.unpack('!I', self._recv_buffer[:4])[0]
-                if len(self._recv_buffer) >= 4 + data_size:
-                    audio_bytes = self._recv_buffer[4:4+data_size]
-                    self._recv_buffer = self._recv_buffer[4+data_size:]
-
-                    audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
-                    try:
-                        self.audio_buffer.put_nowait(audio_array)
-                    except queue.Full:
-                        # переполнение – удаляем старый пакет
-                        try:
-                            self.audio_buffer.get_nowait()
-                            self.audio_buffer.put_nowait(audio_array)
-                        except queue.Empty:
-                            pass
-                else:
-                    break
-
         except socket.timeout:
-            pass
+            logger.warning("⏱️ send_audio_data: таймаут отправки")
+            return False
         except Exception as e:
-            if self.is_active and not self.local_mode:
-                logger.debug(f"Ошибка приема аудио данных: {e}")
-        
+            logger.error(f"❌ Ошибка отправки аудио: {e}", exc_info=True)
+            return False
+    
+    def _audio_receiver_loop(self):
+        logger.info("Запуск аудио-приёмника")
+        buffer = b''
+        synced = False
+        while self.is_active and self.audio_receiver_running and self.call_socket:
+            try:
+                if self.secure_mode:
+                    packet = self.call_socket.recv(timeout=0.5)
+                    if not packet:
+                        break
+                    if len(packet) < 4:
+                        continue
+                    data_len = struct.unpack('!I', packet[:4])[0]
+                    if 0 < data_len <= MAX_AUDIO_PACKET_SIZE and len(packet) >= 4 + data_len:
+                        audio_bytes = packet[4:4+data_len]
+                        audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+                        self._put_to_buffer(audio_array)
+                else:
+                    try:
+                        chunk = self.call_socket.recv(4096)
+                    except socket.timeout:
+                        continue
+                    except Exception as e:
+                        logger.error(f"❌ Ошибка приёма аудио: {e}")
+                        break
+
+                    if not chunk:
+                        logger.warning("🔌 Соединение закрыто удалённой стороной (пустой чанк)")
+                        break
+
+                    buffer += chunk
+                    logger.debug(f"📥 Получено {len(chunk)} байт, буфер приёмника: {len(buffer)}")
+
+                    # Поиск первого корректного пакета (синхронизация)
+                    while not synced and len(buffer) >= 4:
+                        maybe_len = struct.unpack('!I', buffer[:4])[0]
+                        if 0 < maybe_len <= MAX_AUDIO_PACKET_SIZE:
+                            synced = True
+                            logger.info("🔄 Синхронизация аудиопотока успешна")
+                        else:
+                            buffer = buffer[1:]  # сдвигаем на 1 байт и ищем дальше
+                            if len(buffer) % 4096 == 0:
+                                logger.debug(f"⏳ Ожидание синхронизации, буфер {len(buffer)} байт")
+
+                    # Извлечение пакетов после синхронизации
+                    while synced and len(buffer) >= 4:
+                        data_len = struct.unpack('!I', buffer[:4])[0]
+                        if not (0 < data_len <= MAX_AUDIO_PACKET_SIZE):
+                            # Некорректный заголовок – сброс синхронизации и поиск заново
+                            logger.warning("⚠️ Некорректный заголовок пакета, сброс синхронизации")
+                            synced = False
+                            break
+                        if len(buffer) >= 4 + data_len:
+                            audio_bytes = buffer[4:4+data_len]
+                            audio_array = np.frombuffer(audio_bytes, dtype=np.float32)
+                            self._put_to_buffer(audio_array)
+                            buffer = buffer[4+data_len:]
+                        else:
+                            break
+            except Exception as e:
+                if self.is_active:
+                    logger.error(f"❌ Ошибка в цикле приёма: {e}")
+                break
+        self.audio_receiver_running = False
+        logger.info("Аудио-приёмник остановлен")
+
+    def _put_to_buffer(self, audio_array):
+        """Вспомогательный метод для вставки в очередь с логированием"""
+        try:
+            self.audio_buffer.put_nowait(audio_array)
+            self.received_packets += 1
+            if self.received_packets % 50 == 0:
+                logger.info(f"📥 Принят аудио-пакет #{self.received_packets}, буфер: {self.audio_buffer.qsize()}")
+        except queue.Full:
+            logger.warning("⚠️ Буфер воспроизведения переполнен, пакет отброшен")
+
     def start_audio_receiver(self):
         """Запуск потока для приема аудио данных"""
         if self.audio_receiver_running or self.local_mode:
             return
+        self.audio_receiver_running = True
+        self.audio_receiver_thread = threading.Thread(target=self._audio_receiver_loop, daemon=True)
+        self.audio_receiver_thread.start()
             
-        def audio_receiver():
-            logger.info("Запуск приемника аудио данных")
-            self.audio_receiver_running = True
-            while self.is_active and self.call_socket and not self.local_mode and self.audio_receiver_running:
-                try:
-                    self.receive_audio_data()
-                    time.sleep(0.005)  # небольшая пауза для снижения нагрузки
-                except Exception as e:
-                    if self.is_active and not self.local_mode:
-                        logger.debug(f"Ошибка в аудио приемнике: {e}")
-                    break
-            self.audio_receiver_running = False
-            logger.info("Приемник аудио данных остановлен")
+    def audio_receiver():
+        logger.info("Запуск приемника аудио данных")
+        self.audio_receiver_running = True
+        while self.is_active and self.call_socket and not self.local_mode and self.audio_receiver_running:
+            try:
+                self.receive_audio_data()
+                time.sleep(0.005)  # небольшая пауза для снижения нагрузки
+            except Exception as e:
+                if self.is_active and not self.local_mode:
+                    logger.debug(f"Ошибка в аудио приемнике: {e}")
+                break
+        self.audio_receiver_running = False
+        logger.info("Приемник аудио данных остановлен")
 
         self.audio_receiver_thread = threading.Thread(target=audio_receiver, daemon=True)
         self.audio_receiver_thread.start()

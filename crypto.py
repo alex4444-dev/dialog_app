@@ -7,6 +7,7 @@ import base64
 import os
 import json
 
+
 class CryptoManager:
     def __init__(self):
         self.private_key = None
@@ -167,3 +168,34 @@ class CryptoManager:
         except Exception as e:
             print(f"Session establishment failed: {e}")
             return False
+
+    def encrypt_packet(self, plaintext: bytes) -> bytes:
+        """Шифрует данные в формате [nonce(12)][ciphertext][tag(16)]."""
+        if not self.symmetric_key:
+            raise Exception("Симметричный ключ не установлен")
+        nonce = os.urandom(12)
+        cipher = Cipher(
+            algorithms.AES(self.symmetric_key),
+            modes.GCM(nonce),
+            backend=default_backend()
+        )
+        encryptor = cipher.encryptor()
+        ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+        return nonce + ciphertext + encryptor.tag
+
+    def decrypt_packet(self, encrypted_packet: bytes) -> bytes:
+        """Расшифровывает пакет, формат такой же как у encrypt_packet."""
+        if not self.symmetric_key:
+            raise Exception("Симметричный ключ не установлен")
+        if len(encrypted_packet) < 28:  # 12+16 минимум
+            raise ValueError("Пакет слишком короткий")
+        nonce = encrypted_packet[:12]
+        tag = encrypted_packet[-16:]
+        ciphertext = encrypted_packet[12:-16]
+        cipher = Cipher(
+            algorithms.AES(self.symmetric_key),
+            modes.GCM(nonce, tag),
+            backend=default_backend()
+        )
+        decryptor = cipher.decryptor()
+        return decryptor.update(ciphertext) + decryptor.finalize()
