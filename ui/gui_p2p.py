@@ -105,8 +105,7 @@ class P2PMainWindow(QMainWindow):
         self.sig_call_status.connect(self.on_call_status)
         self.chat_windows = {}
 
-        #if hasattr(self.p2p_client, 'message_received'):
-        #    self.p2p_client.message_received.connect(self.handle_received_message)
+        
 
         self.init_ui()      
     
@@ -717,6 +716,7 @@ class P2PMainWindow(QMainWindow):
     
     def on_video_socket_ready(self, call_id, client_socket):
         """Обновить видео-сокет в окне звонка после установки соединения"""
+        logger.info(f"📹 Получен готовый видео-сокет для {call_id}: {type(client_socket)}")
         if call_id in self.active_calls:
             call_info = self.active_calls[call_id]
             video_window = call_info['window']
@@ -926,10 +926,12 @@ class P2PMainWindow(QMainWindow):
 
     def _set_audio_socket_with_retry(self, video_window, call_id, timeout=5):
         """Ожидает появления клиентского аудио-сокета и устанавливает его в окно видеозвонка"""
+        logger.info(f"Ожидаю аудио-сокет для {call_id}...")
         def wait_and_set():
             try:
                 client_sock = self.p2p_client.wait_for_call_socket(call_id, timeout=timeout)
                 if client_sock:
+                    logger.info(f"Получен аудио-сокет: {type(client_sock)}")
                     video_window.set_audio_socket(client_sock)
                     logger.info(f"✅ Аудио-сокет для звонка {call_id} установлен")
                 else:
@@ -1878,9 +1880,9 @@ class P2PMainWindow(QMainWindow):
 
             # Функция для подключения видео (как было раньше)
             def try_connect_video(attempt=0):
-                if attempt >= 10:
-                    logger.error(f"❌ Не удалось подключиться к видео после 10 попыток")
-                    video_window.status_label.setText("❌ Ошибка подключения видео")
+                if attempt >= 30:
+                    logger.error(f"❌ Не удалось подключиться к видео после 30 попыток")
+                    video_window.status_label.setText("❌ Видео недоступно")
                     return
 
                 call_info = self.p2p_client.call_requests.get(call_id, {})
@@ -1895,19 +1897,21 @@ class P2PMainWindow(QMainWindow):
 
                 if not video_port or not media_host:
                     logger.warning(f"⚠️ Попытка {attempt+1}: video_port={video_port}, media_host={media_host}, повтор через 0.5 сек")
-                    QTimer.singleShot(500, lambda: try_connect_video(attempt+1))
+                    QTimer.singleShot(300, lambda: try_connect_video(attempt+1))
                     return
 
                 try:
                     video_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                     video_socket.settimeout(5.0)
                     video_socket.connect((media_host, video_port))
-                    video_socket.settimeout(30.0)
-                    video_window.set_video_socket(video_socket)
-                    logger.info(f"✅ Видео-сокет подключён к {media_host}:{video_port}")
+                    # Обмен ключами (клиентская сторона)
+                    secure = self.p2p_client._perform_media_key_exchange(video_socket, initiator=True)
+                    video_window.set_video_socket(secure)
+                    video_socket.settimeout(30.0)  
+                    logger.info(f"✅ Защищённое видео-соединение установлено")
                 except Exception as e:
                     logger.warning(f"⚠️ Попытка {attempt+1}: не удалось подключиться к видео: {e}")
-                    QTimer.singleShot(1000, lambda: try_connect_video(attempt+1))
+                    QTimer.singleShot(500, lambda: try_connect_video(attempt+1))
 
             QTimer.singleShot(100, lambda: try_connect_video(0))
 
@@ -1969,21 +1973,20 @@ class P2PMainWindow(QMainWindow):
         # Подключаем сигнал готовности видео-сокета (если нужно)
         self.p2p_client.video_socket_ready.connect(self.on_video_socket_ready)
 
-        # Получаем серверный сокет для видео (или None)
-        video_socket = self.p2p_client.setup_video_connection(call_id, username)
-        if video_socket:
-            video_window.set_video_socket(video_socket)
-            logger.info(f"✅ Видео-сокет для звонка {call_id} создан")
+        # Запускаем серверный сокет для ожидания видео-подключения
+        video_server_socket = self.p2p_client.setup_video_connection(call_id, username)
+        if video_server_socket:
+            logger.info(f"📹 Видео-сервер запущен для звонка {call_id} на порту {self.p2p_client.call_requests[call_id].get('video_local_port')}")
         else:
-            logger.warning(f"⚠️ Не удалось получить видео-сокет для звонка {call_id}")
-            self.system_chat.append(f"⚠️ Видеозвонок начат, но видео соединение не установлено")
-
+            logger.error(f"❌ Видео-сервер НЕ запущен для звонка {call_id} – проверьте логи p2p_network.py")
+            video_window.status_label.setText("❌ Ошибка видео-сервера")
+                
         # ===== АУДИО: создаём серверный сокет и запускаем ожидание клиентского подключения =====
         self.p2p_client.setup_call_connection(call_id, username, is_outgoing=True)
         
         # Для исходящего звонка audio_socket – это серверный сокет.
         # Запускаем фоновое ожидание, когда он примет входящее соединение.
-        self._set_audio_socket_with_retry(video_window, call_id, timeout=5)
+        self._set_audio_socket_with_retry(video_window, call_id, timeout=10)
         
         # Сохраняем информацию о звонке
         self.active_calls[call_id] = {

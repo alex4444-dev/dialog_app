@@ -51,7 +51,7 @@ class SecureChannel:
             logger.error(f"Ошибка приёма: {e}")
             self.close()
             raise
-
+ 
     def close(self):
         self._closed = True
         self.sock.close()

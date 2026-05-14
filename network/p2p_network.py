@@ -1063,10 +1063,11 @@ class P2PNetworkClient(QObject):
             logger.info(f"✅ Видео подключение установлено от {client_addr}")
             
             # Сохраняем клиентский сокет
-            self.media_sockets[f"{call_id}_video"] = client_socket
+            secure = self._perform_media_key_exchange(client_socket, initiator=False)
+            self.media_sockets[f"{call_id}_video"] = secure
 
             # ОТПРАВЛЯЕМ СИГНАЛ, ЧТО КЛИЕНТСКИЙ СОКЕТ ГОТОВ
-            self.video_socket_ready.emit(call_id, client_socket)
+            self.video_socket_ready.emit(call_id, secure)
             
             # Закрываем серверный сокет
             server_socket.close()
@@ -1131,7 +1132,8 @@ class P2PNetworkClient(QObject):
                         video_socket.settimeout(30.0)
                         
                         # Сохраняем сокет
-                        self.media_sockets[f"{call_id}_video"] = video_socket
+                        secure = self._perform_media_key_exchange(video_socket, initiator=True)
+                        self.media_sockets[f"{call_id}_video"] = secure
                         
                         logger.info(f"✅ Видео соединение для звонка {call_id} установлено")
                         
@@ -1145,20 +1147,20 @@ class P2PNetworkClient(QObject):
     def setup_call_connection(self, call_id: str, peer_username: str, is_outgoing: bool):
         """
         Устанавливает медиа-соединение для звонка.
-        Для исходящего звонка ожидает готовый клиентский сокет (ранее созданный в send_call_request),
-        для входящего – подключается к медиа-серверу собеседника.
-        Возвращает сокет или None при ошибке.
+        Для исходящего звонка ожидает готовый клиентский сокет (уже SecureChannel),
+        для входящего – подключается к медиа-серверу собеседника, выполняет обмен ключами.
+        Возвращает защищённый канал или None при ошибке.
         """
         try:
             logger.info(f"🔊 Установка медиа-соединения для звонка {call_id}, исходящий: {is_outgoing}")
 
-            # === Исходящий звонок: мы уже запустили accept_media при отправке запроса ===
+            # === Исходящий звонок ===
             if is_outgoing:
                 start_time = time.time()
                 timeout = 10.0  # до 10 секунд на ожидание подключения собеседника
                 while time.time() - start_time < timeout:
                     sock = self.media_sockets.get(call_id)
-                    # Клиентский сокет не должен быть слушающим и должен быть живым
+                    # Теперь _is_client_socket понимает SecureChannel
                     if self._is_client_socket(sock):
                         logger.info(f"✅ Найден готовый клиентский сокет для исходящего звонка {call_id}")
                         return sock
@@ -1202,45 +1204,52 @@ class P2PNetworkClient(QObject):
                 client_socket.close()
                 return None
 
-            # 4. Отправить подтверждение
+            
+
+            # 5. Обмен ключами – клиентская сторона (initiator=True)
             try:
-                client_socket.send(json.dumps({'type': 'media_ready', 'call_id': call_id}).encode())
+                secure = self._perform_media_key_exchange(client_socket, initiator=True)   
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки media_ready: {e}")
+                logger.error(f"❌ Ошибка обмена ключами: {e}")
                 client_socket.close()
                 return None
 
-            # 5. Сохранить сокет и вернуть его
-            self.media_sockets[call_id] = client_socket
-            # Привязываем звонок к активным аудиовызовам (если ещё не)
+            
+            # Сохраняем защищённый канал
+            self.media_sockets[call_id] = secure
+
+            # Привязываем звонок к активным аудиовызовам
             peer_id = f"{peer_host}:{peer_port}"
             if call_id not in self.active_audio_calls:
                 self.active_audio_calls[call_id] = peer_id
 
             logger.info(f"✅ Медиа-соединение для входящего звонка {call_id} готово")
-            return client_socket
+            return secure
 
         except Exception as e:
             logger.error(f"❌ Критическая ошибка в setup_call_connection: {e}")
             return None
 
+
     def _is_client_socket(self, sock):
-        """Проверяет, что сокет жив, не является слушающим (серверным)."""
+        """Проверяет, что сокет жив, не является слушающим (серверным), в том числе SecureChannel."""
         if sock is None:
             return False
+        # Защищённый канал всегда считается активным клиентским сокетом
+        if isinstance(sock, SecureChannel):
+            return True
         try:
             if sock.fileno() == -1:
                 return False
         except:
             return False
         try:
-            # SO_ACCEPTCONN == 0 означает, что сокет НЕ слушает входящие подключения
             if sock.getsockopt(socket.SOL_SOCKET, socket.SO_ACCEPTCONN):
                 return False
         except:
             return False
         return True
-    
+
     def _derive_key(self, master_key: bytes, context: str) -> bytes:
         """
         Выводит производный ключ из мастер-ключа с использованием HKDF или HMAC-SHA256.
@@ -1327,7 +1336,8 @@ class P2PNetworkClient(QObject):
                             response = {'status': 'connected', 'call_id': call_id}
                             client_socket.send(json.dumps(response).encode())
                             # Заменяем серверный сокет на клиентский
-                            self.media_sockets[call_id] = client_socket
+                            secure = self._perform_media_key_exchange(client_socket, initiator=False)
+                            self.media_sockets[call_id] = secure
                             server_socket.close()
                             logger.info(f"✅ Соединение для звонка {call_id} полностью установлено")
                             return
@@ -2100,8 +2110,9 @@ class P2PNetworkClient(QObject):
                 try:
                     client_sock, client_addr = server_socket.accept()
                     logger.info(f"✅ Медиа-подключение для звонка {call_id} от {client_addr}")
-                    client_sock.send(json.dumps({'type': 'media_ready', 'call_id': call_id}).encode())
-                    self.media_sockets[call_id] = client_sock
+                    # Сначала обмен ключами (серверная сторона, initiator=False)
+                    secure = self._perform_media_key_exchange(client_sock, initiator=False)
+                    self.media_sockets[call_id] = secure
                     if call_id in self.pending_media_sockets:
                         del self.pending_media_sockets[call_id]
                     server_socket.close()
@@ -2615,6 +2626,75 @@ class P2PNetworkClient(QObject):
         self.peer_crypto[peer_id] = crypto
         logger.info(f"Ключи установлены с {peer_id}")
     
+    def _send_raw(self, sock: socket.socket, data: bytes) -> None:
+        """Отправляет данные с завершающим '\n'."""
+        sock.sendall(data)
+
+    def _recv_raw(self, sock: socket.socket) -> Optional[bytes]:
+        """Получает одну строку до '\n', возвращает декодированные байты без '\n'."""
+        buf = b''
+        while b'\n' not in buf:
+            try:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return None
+                buf += chunk
+            except socket.timeout:
+                continue
+            except Exception as e:
+                logger.error(f"Ошибка приёма данных: {e}")
+                return None
+        line, rest = buf.split(b'\n', 1)
+        # Остаток можно сохранить, если нужно, но в данном протоколе мы используем только одну строку
+        return line
+
+    def _perform_media_key_exchange(self, sock: socket.socket, initiator: bool):
+        """
+        Асимметричный обмен ключами для медиа‑канала.
+        initiator=True  – клиент (подключается), генерирует симметричный ключ.
+        initiator=False – сервер (принимает), получает ключ от клиента.
+        Возвращает SecureChannel.
+        """
+        logger.info("🔐 Обмен ключами для медиа (initiator=%s)", initiator)
+        crypto = CryptoManager()
+        crypto.generate_key_pair()
+
+        # 1. Обе стороны обмениваются публичными ключами
+        # Отправляем свой ключ
+        pub_key = crypto.serialize_public_key()
+        self._send_raw(sock, json.dumps({'type': 'public_key', 'key': pub_key}).encode() + b'\n')
+        # Получаем ключ партнёра
+        raw = self._recv_raw(sock)
+        if not raw:
+            raise ConnectionError("Не получен публичный ключ партнёра")
+        data = json.loads(raw.decode())
+        if data.get('type') != 'public_key':
+            raise ValueError("Ожидалось сообщение 'public_key'")
+        crypto.deserialize_public_key(data['key'])
+        logger.debug("Публичные ключи exchanged")
+
+        if initiator:
+            # 2. Клиент генерирует симметричный ключ и отправляет серверу
+            sym_key = crypto.generate_symmetric_key()
+            encrypted_key = crypto.encrypt_symmetric_key(sym_key)
+            enc_b64 = base64.b64encode(encrypted_key).decode()
+            self._send_raw(sock, json.dumps({'type': 'symmetric_key', 'key': enc_b64}).encode() + b'\n')
+            crypto.symmetric_key = sym_key
+            logger.debug("Симметричный ключ отправлен серверу")
+        else:
+            # 3. Сервер принимает зашифрованный симметричный ключ от клиента
+            raw_key = self._recv_raw(sock)
+            if not raw_key:
+                raise ConnectionError("Не получен симметричный ключ от клиента")
+            key_data = json.loads(raw_key.decode())
+            encrypted_key = base64.b64decode(key_data['key'])
+            crypto.symmetric_key = crypto.decrypt_symmetric_key(encrypted_key)
+            logger.debug("Симметричный ключ получен и расшифрован")
+
+        secure = SecureChannel(sock, crypto)
+        logger.info("✅ Защищённый медиа-канал установлен")
+        return secure
+
     @property
     def connected(self):
         """Свойство для обратной совместимости"""
