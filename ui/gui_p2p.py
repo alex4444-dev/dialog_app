@@ -272,6 +272,21 @@ class P2PMainWindow(QMainWindow):
                 child.deleteLater()
             self.setup_hotkeys()
 
+        # сеть
+        if 'network_port' in settings or 'bootstrap_nodes' in settings:
+            # Для применения этих настроек требуется перезапуск P2P клиента
+            reply = QMessageBox.question(self, "Применить сетевые настройки",
+                                        "Изменение сетевых параметров требует перезапуска P2P сети.\n"
+                                        "Перезапустить сейчас?",
+                                        QMessageBox.Yes | QMessageBox.No)
+            if reply == QMessageBox.Yes:
+                # Перезапускаем P2P клиент с новыми настройками
+                self.p2p_client.stop()
+                # Применить порт и bootstrap узлы
+                self.p2p_client.listen_port = settings.get('network_port', self.p2p_client.listen_port)
+                self.p2p_client.bootstrap_nodes = settings.get('bootstrap_nodes', self.p2p_client.bootstrap_nodes)
+                self.p2p_client.start()
+
 
     def focus_message_input(self):
         """Переключает фокус на поле ввода активной вкладки чата"""

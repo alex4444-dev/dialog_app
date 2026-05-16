@@ -10,12 +10,13 @@ import sys
 import os
 import logging
 import cv2
+import yaml
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QWidget,
                              QListWidget, QListWidgetItem, QStackedWidget,
                              QPushButton, QDialogButtonBox, QLabel,
                              QGroupBox, QComboBox, QMessageBox,
                              QCheckBox, QFormLayout, QLineEdit, QSpinBox, QFileDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox,
-                             QKeySequenceEdit, QHeaderView)
+                             QKeySequenceEdit, QHeaderView, QSizePolicy)
 from PyQt5.QtCore import Qt, pyqtSignal, QSettings, QStandardPaths
 from PyQt5.QtGui import QImage, QPixmap, QKeySequence
 import sounddevice as sd
@@ -1103,14 +1104,284 @@ class HotkeysSettingsPage(QWidget):
         return self.hotkeys.copy()
 
 class NetworkSettingsPage(QWidget):
-    """Вкладка сетевых настроек (заглушка)"""
+    """Вкладка сетевых настроек (P2P, bootstrap, STUN/TURN)"""
+    network_settings_changed = pyqtSignal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
+        self.settings = QSettings('DialogApp', 'P2PClient')
+        self.init_ui()
+        self.load_settings()
+
+    def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Сетевые настройки"))
-        layout.addWidget(QLabel("Здесь будут настройки P2P сети, прокси и т.д."))
+        layout.setSpacing(12)
+
+        # --- Порт прослушивания ---
+        port_group = QGroupBox("Локальный порт")
+        port_layout = QHBoxLayout()
+        self.port_spin = QSpinBox()
+        self.port_spin.setRange(1024, 65535)
+        self.port_spin.setToolTip("Порт, на котором клиент будет принимать P2P-подключения")
+        port_layout.addWidget(QLabel("Порт:"))
+        port_layout.addWidget(self.port_spin)
+        port_layout.addStretch()
+        port_group.setLayout(port_layout)
+        layout.addWidget(port_group)
+
+        # --- Bootstrap узлы ---
+        bootstrap_group = QGroupBox("Bootstrap-узлы")
+        bootstrap_group.setToolTip("Узлы для первоначального входа в P2P-сеть")
+        bootstrap_layout = QVBoxLayout()
+
+        # Таблица bootstrap узлов
+        self.bootstrap_table = QTableWidget()
+        self.bootstrap_table.setColumnCount(2)
+        self.bootstrap_table.setHorizontalHeaderLabels(["Хост", "Порт"])
+        self.bootstrap_table.horizontalHeader().setStretchLastSection(True)
+        self.bootstrap_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.bootstrap_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.bootstrap_table.setMinimumHeight(200)  # минимальная высота 200 пикселей
+        self.bootstrap_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        bootstrap_layout.addWidget(self.bootstrap_table)
+
+        # Кнопки управления таблицей
+        btn_layout = QHBoxLayout()
+        self.add_bootstrap_btn = QPushButton("➕ Добавить")
+        self.add_bootstrap_btn.clicked.connect(self.add_bootstrap_node)
+        self.edit_bootstrap_btn = QPushButton("✏️ Изменить")
+        self.edit_bootstrap_btn.clicked.connect(self.edit_bootstrap_node)
+        self.del_bootstrap_btn = QPushButton("🗑️ Удалить")
+        self.del_bootstrap_btn.clicked.connect(self.del_bootstrap_node)
+        btn_layout.addWidget(self.add_bootstrap_btn)
+        btn_layout.addWidget(self.edit_bootstrap_btn)
+        btn_layout.addWidget(self.del_bootstrap_btn)
+        btn_layout.addStretch()
+        bootstrap_layout.addLayout(btn_layout)
+
+        bootstrap_group.setLayout(bootstrap_layout)
+        layout.addWidget(bootstrap_group)
+
+        # --- Информация о сети ---
+        info_group = QGroupBox("Статус сети")
+        info_layout = QFormLayout()
+        self.status_label = QLabel("Неизвестно")
+        self.peers_label = QLabel("0")
+        self.known_peers_label = QLabel("0")
+        self.public_ip_label = QLabel("Не определён")
+        info_layout.addRow("Статус:", self.status_label)
+        info_layout.addRow("Подключенные пиры:", self.peers_label)
+        info_layout.addRow("Известные пиры:", self.known_peers_label)
+        info_layout.addRow("Публичный IP:", self.public_ip_label)
+        info_group.setLayout(info_layout)
+        layout.addWidget(info_group)
+
+        # Кнопка обновления информации
+        self.refresh_info_btn = QPushButton("🔄 Обновить информацию о сети")
+        self.refresh_info_btn.clicked.connect(self.refresh_network_info)
+        layout.addWidget(self.refresh_info_btn)
+
+        # Кнопка тестирования подключения к bootstrap
+        self.test_bootstrap_btn = QPushButton("🌐 Проверить bootstrap-узлы")
+        self.test_bootstrap_btn.clicked.connect(self.test_bootstrap_connections)
+        layout.addWidget(self.test_bootstrap_btn)
+
         layout.addStretch()
 
+    
+    def _load_defaults_from_config(self):
+        """Загружает bootstrap-узлы из config.yaml (если файл существует)"""
+        # Абсолютный путь к config.yaml: поднимаемся на один уровень от папки ui
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)   # корень проекта
+        config_path = os.path.join(project_root, 'config.yaml')
+        
+        logger.debug(f"Поиск config.yaml: {config_path}")
+        
+        if not os.path.exists(config_path):
+            logger.warning(f"Файл config.yaml не найден по пути {config_path}")
+            return []
+    
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+            
+            # Извлекаем bootstrap_nodes из структуры network
+            nodes = config.get('network', {}).get('bootstrap_nodes', [])
+            result = []
+            for node in nodes:
+                # Поддерживаем формат {"host": "...", "port": ...}
+                if isinstance(node, dict) and 'host' in node and 'port' in node:
+                    result.append((node['host'], node['port']))
+                # Поддерживаем формат ["host", port] на всякий случай
+                elif isinstance(node, list) and len(node) == 2:
+                    result.append((node[0], node[1]))
+            
+            logger.info(f"Загружено {len(result)} bootstrap-узлов из config.yaml")
+            return result
+        except Exception as e:
+            logger.error(f"Ошибка чтения config.yaml: {e}")
+            return []
+
+    def load_settings(self):
+        """Загружает сохранённые настройки сети"""
+        # Порт
+        self.port_spin.setValue(self.settings.value('network_port', 8890, type=int))
+
+        # Bootstrap узлы
+        size = self.settings.beginReadArray("bootstrap_nodes")
+        nodes = []
+        for i in range(size):
+            self.settings.setArrayIndex(i)
+            host = self.settings.value("host")
+            port = self.settings.value("port")
+            if host and port:
+                nodes.append((host, port))
+        self.settings.endArray()
+        if not nodes:
+            # Если в QSettings нет – берём из config.yaml
+            nodes = self._load_defaults_from_config()
+            if not nodes:    
+                # Абсолютный fallback, если и файла нет
+                nodes = [("localhost", 8888)]
+            
+        self.update_bootstrap_table(nodes)
+
+    def save_settings(self):
+        """Сохраняет настройки сети в QSettings"""
+        self.settings.setValue('network_port', self.port_spin.value())
+        self.settings.beginWriteArray("bootstrap_nodes")
+        for i, (host, port) in enumerate(self.get_bootstrap_nodes()):
+            self.settings.setArrayIndex(i)
+            self.settings.setValue("host", host)
+            self.settings.setValue("port", port)
+        self.settings.endArray()
+        self.settings.sync()
+
+    def get_bootstrap_nodes(self):
+        """Возвращает список кортежей (host, port) из таблицы"""
+        nodes = []
+        for row in range(self.bootstrap_table.rowCount()):
+            host_item = self.bootstrap_table.item(row, 0)
+            port_item = self.bootstrap_table.item(row, 1)
+            if host_item and port_item:
+                host = host_item.text()
+                try:
+                    port = int(port_item.text())
+                    nodes.append((host, port))
+                except ValueError:
+                    pass
+        return nodes
+
+    def on_port_changed(self, value):
+        self.network_settings_changed.emit(self.get_settings())
+    
+    def update_bootstrap_table(self, nodes):
+        """Обновляет таблицу bootstrap узлов"""
+        self.bootstrap_table.setRowCount(len(nodes))
+        for row, (host, port) in enumerate(nodes):
+            self.bootstrap_table.setItem(row, 0, QTableWidgetItem(host))
+            self.bootstrap_table.setItem(row, 1, QTableWidgetItem(str(port)))
+        self.bootstrap_table.resizeColumnsToContents()
+        self.network_settings_changed.emit(self.get_settings())
+
+    def add_bootstrap_node(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Добавить bootstrap-узел")
+        layout = QVBoxLayout(dialog)
+        host_edit = QLineEdit()
+        host_edit.setPlaceholderText("IP-адрес или домен")
+        port_edit = QSpinBox()
+        port_edit.setRange(1, 65535)
+        port_edit.setValue(8888)
+        layout.addWidget(QLabel("Хост:"))
+        layout.addWidget(host_edit)
+        layout.addWidget(QLabel("Порт:"))
+        layout.addWidget(port_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            host = host_edit.text().strip()
+            if host:
+                nodes = self.get_bootstrap_nodes()
+                nodes.append((host, port_edit.value()))
+                self.update_bootstrap_table(nodes)
+
+    def edit_bootstrap_node(self):
+        row = self.bootstrap_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Редактирование", "Выберите узел для редактирования")
+            return
+        host = self.bootstrap_table.item(row, 0).text()
+        port = int(self.bootstrap_table.item(row, 1).text())
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Редактировать bootstrap-узел")
+        layout = QVBoxLayout(dialog)
+        host_edit = QLineEdit(host)
+        port_edit = QSpinBox()
+        port_edit.setRange(1, 65535)
+        port_edit.setValue(port)
+        layout.addWidget(QLabel("Хост:"))
+        layout.addWidget(host_edit)
+        layout.addWidget(QLabel("Порт:"))
+        layout.addWidget(port_edit)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            new_host = host_edit.text().strip()
+            if new_host:
+                nodes = self.get_bootstrap_nodes()
+                nodes[row] = (new_host, port_edit.value())
+                self.update_bootstrap_table(nodes)
+
+    def del_bootstrap_node(self):
+        row = self.bootstrap_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Удаление", "Выберите узел для удаления")
+            return
+        nodes = self.get_bootstrap_nodes()
+        nodes.pop(row)
+        self.update_bootstrap_table(nodes)
+
+    def refresh_network_info(self):
+        """Запрашивает информацию о сети у главного окна (если доступно)"""
+        if self.parent() and hasattr(self.parent(), 'get_network_info'):
+            info = self.parent().get_network_info()
+            self.status_label.setText(info.get('status', 'Неизвестно'))
+            self.peers_label.setText(str(info.get('connected_peers', 0)))
+            self.known_peers_label.setText(str(info.get('known_peers', 0)))
+        else:
+            # Заглушка – можно попробовать получить из p2p_client через parent
+            self.status_label.setText("Нет данных (запустите приложение)")
+        # Публичный IP можно определить через внешний сервис (заглушка)
+        self.public_ip_label.setText("—")
+
+    def test_bootstrap_connections(self):
+        """Тестирует подключение к bootstrap узлам (отправка ping на порт)"""
+        import socket
+        nodes = self.get_bootstrap_nodes()
+        results = []
+        for host, port in nodes:
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2.0)
+                sock.connect((host, port))
+                sock.close()
+                results.append(f"✅ {host}:{port} – доступен")
+            except:
+                results.append(f"❌ {host}:{port} – недоступен")
+        QMessageBox.information(self, "Результаты проверки", "\n".join(results))
+
+    def get_settings(self):
+        """Возвращает словарь с сетевыми настройками для применения"""
+        return {
+            'network_port': self.port_spin.value(),
+            'bootstrap_nodes': self.get_bootstrap_nodes()
+        }
 
 class SettingsDialog(QDialog):
     """
@@ -1171,7 +1442,7 @@ class SettingsDialog(QDialog):
         self.hotkeys_page = HotkeysSettingsPage()
         self.network_page = NetworkSettingsPage()
 
-        # Обёртываем каждую страницу в QScrollArea
+        # Оборачиваем каждую страницу в QScrollArea
         from PyQt5.QtWidgets import QScrollArea
 
         def wrap_with_scroll(widget):
@@ -1277,7 +1548,8 @@ class SettingsDialog(QDialog):
             'output_device': self.audio_page.output_device
         })
         all_settings.update(self.video_page.get_current_settings())        
-        self.settings_changed.emit(self.settings_data)
+        all_settings.update(self.network_page.get_settings())
+        self.settings_changed.emit(all_settings)
         logger.info("Настройки применены")
         QMessageBox.information(self, "Настройки", "Настройки сохранены.")
 
