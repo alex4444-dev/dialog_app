@@ -10,9 +10,9 @@ from typing import List, Dict, Tuple
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
                              QMessageBox, QStatusBar, QTextEdit, QDialog,
-                             QSystemTrayIcon, QStyle, QDesktopWidget)
+                             QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings
-from PyQt5.QtGui import QIcon
+from PyQt5.QtGui import QIcon, QKeySequence
 
 # Добавляем путь к текущей директории для импорта модулей
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -156,11 +156,52 @@ class P2PMainWindow(QMainWindow):
         
         # Создаем системный трей
         self.setup_system_tray()
+
+        
+        self.setup_hotkeys()
         
         # Запускаем работу ком. платформы ДИАЛОГ с задержкой
         QTimer.singleShot(1000, self.start_p2p_messaging)
         
         logger.info("P2P интерфейс инициализирован")
+
+    # Настройки
+    def setup_hotkeys(self):
+        """Устанавливает глобальные горячие клавиши из настроек"""
+        settings = QSettings('DialogApp', 'P2PClient')
+        size = settings.beginReadArray("hotkeys")
+        for i in range(size):
+            settings.setArrayIndex(i)
+            action = settings.value("action")
+            shortcut_str = settings.value("shortcut")
+            if not action or not shortcut_str:
+                continue
+            shortcut = QShortcut(QKeySequence(shortcut_str), self)
+            shortcut.setContext(Qt.ApplicationShortcut)  # Работают даже если окно не в фокусе? Лучше Qt.WindowShortcut
+            shortcut.setContext(Qt.WindowShortcut)  # Только когда окно активно
+
+            # Привязываем действие
+            if action == "Отправить сообщение":
+                shortcut.activated.connect(self.focus_message_input)
+            elif action == "Ответить на звонок":
+                shortcut.activated.connect(self.answer_active_call)
+            elif action == "Отклонить звонок":
+                shortcut.activated.connect(self.reject_active_call)
+            elif action == "Завершить звонок":
+                shortcut.activated.connect(self.end_active_call)
+            elif action == "Вкл/Выкл микрофон":
+                shortcut.activated.connect(self.toggle_microphone)
+            elif action == "Показать/скрыть окно":
+                shortcut.activated.connect(self.toggle_window)
+            elif action == "Открыть настройки":
+                shortcut.activated.connect(self.show_audio_settings)
+            elif action == "Выйти из приложения":
+                shortcut.activated.connect(self.close_application)
+            else:
+                # Для пользовательских действий можно добавить обработчик по имени
+                logger.warning(f"Неизвестное действие для горячей клавиши: {action}")
+        settings.endArray()
+        logger.info("Горячие клавиши загружены и установлены")
 
     def show_audio_settings(self):
         """Показать окно настроек аудио"""
@@ -194,6 +235,7 @@ class P2PMainWindow(QMainWindow):
         self.settings.sync()
 
         logger.info(f"Главное окно: обновлены настройки аудио: ввод={new_input}, вывод={new_output}")
+    
 
         # Обновляем устройства во всех активных окнах звонков
         updated_count = 0
@@ -210,6 +252,78 @@ class P2PMainWindow(QMainWindow):
                         "Для применения изменений может потребоваться перезапуск звонка.")
         else:
             logger.info("Активных звонков нет, настройки сохранены.")
+
+        # Обновляем псевдоним
+        if 'nickname' in settings:
+            new_nick = settings['nickname']
+            if new_nick != self.username:
+                self.username = new_nick
+                self.setWindowTitle(f'💬 ДИАЛОГ - (Пользователь: {self.username})')
+                # Также уведомить P2P клиент о смене имени
+                if self.p2p_client:
+                    self.p2p_client.set_username(new_nick)
+                    self.p2p_client.broadcast_self_info()
+
+        
+        # горячие клавиши
+        if 'hotkeys' in settings:
+            # Перезагружаем горячие клавиши (сначала удаляем старые)
+            for child in self.findChildren(QShortcut):
+                child.deleteLater()
+            self.setup_hotkeys()
+
+
+    def focus_message_input(self):
+        """Переключает фокус на поле ввода активной вкладки чата"""
+        current_tab = self.tabs.currentWidget()
+        if isinstance(current_tab, ChatWindow):
+            current_tab.message_input.setFocus()
+            logger.debug("Фокус переведён на поле ввода сообщения")    
+
+    def answer_active_call(self):
+        """Отвечает на первый найденный входящий звонок (если есть)"""
+        for call_id, info in self.active_calls.items():
+            if not info.get('outgoing', False) and info.get('status') == 'incoming':
+                # Принимаем звонок
+                self.accept_call(call_id)
+                logger.info(f"Горячая клавиша: принят звонок {call_id}")
+                return
+        logger.debug("Нет входящих звонков для ответа")
+
+    def reject_active_call(self):
+        """Отклоняет первый найденный входящий звонок"""
+        for call_id, info in self.active_calls.items():
+            if not info.get('outgoing', False) and info.get('status') == 'incoming':
+                self.reject_call(call_id)
+                logger.info(f"Горячая клавиша: отклонён звонок {call_id}")
+                return
+        logger.debug("Нет входящих звонков для отклонения")
+
+    def end_active_call(self):
+        """Завершает первый найденный активный звонок (исходящий или входящий)"""
+        for call_id, info in list(self.active_calls.items()):
+            self.end_call(call_id)
+            logger.info(f"Горячая клавиша: завершён звонок {call_id}")
+            return
+        logger.debug("Нет активных звонков для завершения")
+
+    def toggle_microphone(self):
+        """Включает/выключает микрофон в текущем активном звонке"""
+        # Находим первое активное окно звонка (аудио или видео)
+        for call_id, info in self.active_calls.items():
+            window = info.get('window')
+            if window and hasattr(window, 'toggle_mute'):
+                window.toggle_mute()
+                logger.info(f"Горячая клавиша: микрофон отключен в аудиозвонке")
+                return
+            elif window and hasattr(window, 'audio_core') and hasattr(window.audio_core, 'toggle_mute'):
+                window.audio_core.toggle_mute()
+                logger.info(f"Горячая клавиша: выключн микрофон (видеозвонок)")
+                return
+        logger.debug("Нет активного звонка для управления микрофоном")
+
+    
+    # сеть и интерфейс
 
     def _finalize_call_accept(self, call_id, call_window):
         """Завершающая стадия принятия звонка"""

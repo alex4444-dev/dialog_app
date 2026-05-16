@@ -6,15 +6,18 @@
 Содержит вкладки: Основные, Аудио, Видео, Горячие клавиши, Сеть.
 """
 
+import sys
+import os
 import logging
 import cv2
 from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QWidget,
                              QListWidget, QListWidgetItem, QStackedWidget,
                              QPushButton, QDialogButtonBox, QLabel,
                              QGroupBox, QComboBox, QMessageBox,
-                             QCheckBox, QFormLayout)
-from PyQt5.QtCore import Qt, pyqtSignal, QSettings
-from PyQt5.QtGui import QImage, QPixmap
+                             QCheckBox, QFormLayout, QLineEdit, QSpinBox, QFileDialog, QTableWidget, QTableWidgetItem, QDialogButtonBox,
+                             QKeySequenceEdit, QHeaderView)
+from PyQt5.QtCore import Qt, pyqtSignal, QSettings, QStandardPaths
+from PyQt5.QtGui import QImage, QPixmap, QKeySequence
 import sounddevice as sd
 import numpy as np
 
@@ -22,13 +25,283 @@ logger = logging.getLogger('dialog_gui')
 
 
 class GeneralSettingsPage(QWidget):
-    """Вкладка основных настроек (заглушка)"""
-    def __init__(self, parent=None):
+    """Вкладка основных настроек: звуки, файлы, общие параметры"""
+    # Сигнал, который испускается при изменении псевдонима
+    nickname_changed = pyqtSignal(str)
+
+    def __init__(self, parent=None, current_nickname=None):
         super().__init__(parent)
+        self.settings = QSettings('DialogApp', 'P2PClient')
+        self.current_nickname = current_nickname or ""
+        self.init_ui()
+
+    def init_ui(self):
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Основные настройки приложения"))
-        layout.addWidget(QLabel("Здесь будут общие параметры"))
+        layout.setSpacing(12)
+
+        # ---- Пользовательские настройки ----
+        user_group = QGroupBox("Пользователь")
+        user_layout = QVBoxLayout(user_group)
+
+        # Псевдоним (ник)
+        row_nick = QHBoxLayout()
+        row_nick.addWidget(QLabel("Псевдоним (ник):"))
+        self.nickname_edit = QLineEdit()
+        self.nickname_edit.setText(self.current_nickname)
+        self.nickname_edit.setPlaceholderText("Введите новый псевдоним")
+        row_nick.addWidget(self.nickname_edit)
+        self.apply_nick_btn = QPushButton("Применить")
+        self.apply_nick_btn.clicked.connect(self.apply_nickname)
+        row_nick.addWidget(self.apply_nick_btn)
+        user_layout.addLayout(row_nick)
+        layout.addWidget(user_group)
+
+        # ---- Автозагрузка ----
+        autostart_group = QGroupBox("Автозагрузка")
+        autostart_layout = QVBoxLayout(autostart_group)
+        self.autostart_check = QCheckBox("Запускать программу при старте системы")
+        self.autostart_check.setChecked(self.is_autostart_enabled())
+        self.autostart_check.toggled.connect(self.toggle_autostart)
+        autostart_layout.addWidget(self.autostart_check)
+        layout.addWidget(autostart_group)
+
+        # ---- Файлы ----
+        files_group = QGroupBox("Файлы")
+        files_layout = QVBoxLayout(files_group)
+
+        row_folder = QHBoxLayout()
+        row_folder.addWidget(QLabel("Папка для сохранения:"))
+        self.download_path = QLineEdit()
+        default_download = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
+        self.download_path.setText(self.settings.value('download_folder', default_download, type=str))
+        self.download_path.setReadOnly(True)
+        row_folder.addWidget(self.download_path)
+        btn_folder = QPushButton("Изменить...")
+        btn_folder.clicked.connect(self.browse_download_folder)
+        row_folder.addWidget(btn_folder)
+        files_layout.addLayout(row_folder)
+
+        self.max_file_size = QSpinBox()
+        self.max_file_size.setRange(1, 1024)  # МБ
+        self.max_file_size.setValue(self.settings.value('max_file_size_mb', 500, type=int))
+        self.max_file_size.setSuffix(" МБ")
+        files_layout.addWidget(QLabel("Максимальный размер файла:"))
+        files_layout.addWidget(self.max_file_size)
+
+        layout.addWidget(files_group)
         layout.addStretch()
+        
+        # ---- Звуковые уведомления ----
+        sound_group = QGroupBox("Звуковые уведомления")
+        sound_layout = QVBoxLayout(sound_group)
+
+        self.enable_sounds_check = QCheckBox("Включить звуки")
+        self.enable_sounds_check.setChecked(self.settings.value('sounds_enabled', True, type=bool))
+        sound_layout.addWidget(self.enable_sounds_check)
+
+        # Входящий звонок
+        row_in = QHBoxLayout()
+        row_in.addWidget(QLabel("Входящий звонок:"))
+        self.incoming_call_path = QLineEdit()
+        self.incoming_call_path.setText(self.settings.value('sound_incoming_call', 'sounds/incoming_call.wav', type=str))
+        self.incoming_call_path.setReadOnly(True)
+        row_in.addWidget(self.incoming_call_path)
+        btn_in = QPushButton("Обзор...")
+        btn_in.clicked.connect(lambda: self.browse_sound('incoming_call'))
+        row_in.addWidget(btn_in)
+        sound_layout.addLayout(row_in)
+
+        # Исходящий звонок (ожидание)
+        row_out = QHBoxLayout()
+        row_out.addWidget(QLabel("Исходящий звонок:"))
+        self.outgoing_call_path = QLineEdit()
+        self.outgoing_call_path.setText(self.settings.value('sound_outgoing_call', 'sounds/outgoing_call.wav', type=str))
+        self.outgoing_call_path.setReadOnly(True)
+        row_out.addWidget(self.outgoing_call_path)
+        btn_out = QPushButton("Обзор...")
+        btn_out.clicked.connect(lambda: self.browse_sound('outgoing_call'))
+        row_out.addWidget(btn_out)
+        sound_layout.addLayout(row_out)
+
+        # Новое сообщение
+        row_msg = QHBoxLayout()
+        row_msg.addWidget(QLabel("Новое сообщение:"))
+        self.message_path = QLineEdit()
+        self.message_path.setText(self.settings.value('sound_message', 'sounds/message.wav', type=str))
+        self.message_path.setReadOnly(True)
+        row_msg.addWidget(self.message_path)
+        btn_msg = QPushButton("Обзор...")
+        btn_msg.clicked.connect(lambda: self.browse_sound('message'))
+        row_msg.addWidget(btn_msg)
+        sound_layout.addLayout(row_msg)
+
+        # Получен файл
+        row_file_snd = QHBoxLayout()
+        row_file_snd.addWidget(QLabel("Файл получен:"))
+        self.file_received_path = QLineEdit()
+        self.file_received_path.setText(self.settings.value('sound_file_received', 'sounds/file_received.wav', type=str))
+        self.file_received_path.setReadOnly(True)
+        row_file_snd.addWidget(self.file_received_path)
+        btn_file_snd = QPushButton("Обзор...")
+        btn_file_snd.clicked.connect(lambda: self.browse_sound('file_received'))
+        row_file_snd.addWidget(btn_file_snd)
+        sound_layout.addLayout(row_file_snd)
+
+        layout.addWidget(sound_group)
+
+
+    # ========== Методы для псевдонима ==========
+    
+    def apply_nickname(self):
+        new_nick = self.nickname_edit.text().strip()
+        if not new_nick:
+            QMessageBox.warning(self, "Ошибка", "Псевдоним не может быть пустым")
+            return
+        if new_nick == self.current_nickname:
+            return
+        # Сохраняем в настройки
+        self.settings.setValue('nickname', new_nick)
+        self.current_nickname = new_nick
+        self.nickname_changed.emit(new_nick)
+        QMessageBox.information(self, "Успех", f"Псевдоним изменён на {new_nick}")    
+
+
+    # ========== Методы для автозагрузки ==========
+
+    def is_autostart_enabled(self):
+        """Проверяет, включена ли автозагрузка для текущей ОС"""
+        if sys.platform == 'win32':
+            # Windows: проверяем ключ реестра
+            import winreg
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_READ)
+                value, _ = winreg.QueryValueEx(key, "DialogApp")
+                winreg.CloseKey(key)
+                return True
+            except FileNotFoundError:
+                return False
+        elif sys.platform == 'darwin':
+            # macOS: проверяем наличие .plist в ~/Library/LaunchAgents
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.dialogapp.plist")
+            return os.path.exists(plist_path)
+        else:
+            # Linux: проверяем .desktop файл в ~/.config/autostart
+            desktop_path = os.path.expanduser("~/.config/autostart/dialogapp.desktop")
+            return os.path.exists(desktop_path)
+
+    def toggle_autostart(self, enabled):
+        """Включает/выключает автозагрузку"""
+        if enabled:
+            self._enable_autostart()
+        else:
+            self._disable_autostart()
+
+    def _enable_autostart(self):
+        """Добавляет программу в автозагрузку"""
+        app_path = os.path.abspath(sys.argv[0])
+        if sys.platform == 'win32':
+            import winreg
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+            winreg.SetValueEx(key, "DialogApp", 0, winreg.REG_SZ, app_path)
+            winreg.CloseKey(key)
+        elif sys.platform == 'darwin':
+            # Создаём .plist файл для launchd
+            plist_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+            <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+            <plist version="1.0">
+            <dict>
+                <key>Label</key>
+                <string>com.dialogapp</string>
+                <key>ProgramArguments</key>
+                <array>
+                    <string>{app_path}</string>
+                </array>
+                <key>RunAtLoad</key>
+                <true/>
+            </dict>
+            </plist>"""
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.dialogapp.plist")
+            with open(plist_path, 'w') as f:
+                f.write(plist_content)
+            os.chmod(plist_path, 0o644)
+        else:
+            # Linux: создаём .desktop файл
+            desktop_dir = os.path.expanduser("~/.config/autostart")
+            os.makedirs(desktop_dir, exist_ok=True)
+            desktop_path = os.path.join(desktop_dir, "dialogapp.desktop")
+            desktop_content = f"""[Desktop Entry]
+            Type=Application
+            Name=DialogApp
+            Exec={app_path}
+            Hidden=false
+            NoDisplay=false
+            X-GNOME-Autostart-enabled=true
+            """
+            with open(desktop_path, 'w') as f:
+                f.write(desktop_content)
+
+    def _disable_autostart(self):
+        """Убирает программу из автозагрузки"""
+        if sys.platform == 'win32':
+            import winreg
+            key_path = r"Software\Microsoft\Windows\CurrentVersion\Run"
+            try:
+                key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, key_path, 0, winreg.KEY_SET_VALUE)
+                winreg.DeleteValue(key, "DialogApp")
+                winreg.CloseKey(key)
+            except FileNotFoundError:
+                pass
+        elif sys.platform == 'darwin':
+            plist_path = os.path.expanduser("~/Library/LaunchAgents/com.dialogapp.plist")
+            if os.path.exists(plist_path):
+                os.remove(plist_path)
+        else:
+            desktop_path = os.path.expanduser("~/.config/autostart/dialogapp.desktop")
+            if os.path.exists(desktop_path):
+                os.remove(desktop_path)
+    
+
+    # ======== Методы для установки звуков =========
+
+    def browse_sound(self, sound_name):
+        from PyQt5.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите звуковой файл", "",
+                                                   "Звуковые файлы (*.wav);;Все файлы (*)")
+        if file_path:
+            self.settings.setValue(f'sound_{sound_name}', file_path)
+            # Обновляем отображение
+            if sound_name == 'incoming_call':
+                self.incoming_call_path.setText(file_path)
+            elif sound_name == 'outgoing_call':
+                self.outgoing_call_path.setText(file_path)
+            elif sound_name == 'message':
+                self.message_path.setText(file_path)
+            elif sound_name == 'file_received':
+                self.file_received_path.setText(file_path)
+
+    
+    # ======== Методы для выбора папки загрузк ======
+    
+    def browse_download_folder(self):
+        from PyQt5.QtWidgets import QFileDialog
+        folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения файлов")
+        if folder:
+            self.download_path.setText(folder)
+            self.settings.setValue('download_folder', folder)
+
+    def get_settings(self):
+        """Возвращает словарь с настройками из этой вкладки"""
+        return {
+            'sounds_enabled': self.enable_sounds_check.isChecked(),
+            'sound_incoming_call': self.incoming_call_path.text(),
+            'sound_outgoing_call': self.outgoing_call_path.text(),
+            'sound_message': self.message_path.text(),
+            'sound_file_received': self.file_received_path.text(),
+            'download_folder': self.download_path.text(),
+            'max_file_size_mb': self.max_file_size.value()
+        }        
 
 
 class AudioSettingsPage(QWidget):
@@ -565,6 +838,39 @@ class VideoSettingsPage(QWidget):
         self.start_preview_btn.setEnabled(True)
         self.stop_preview_btn.setEnabled(False)
 
+    def get_current_settings(self):
+        """Возвращает словарь с текущими значениями видео-настроек."""
+        # Синхронизируем атрибуты с UI-элементами (на случай, если пользователь что-то менял)
+        selected_camera = self.camera_combo.currentData()
+        if selected_camera is not None and selected_camera != -1:
+            self.camera_index = selected_camera
+        elif self.available_cameras:
+            self.camera_index = self.available_cameras[0]
+        else:
+            self.camera_index = 0
+
+        res_data = self.resolution_combo.currentData()
+        if res_data:
+            self.resolution = res_data
+
+        fps = self.fps_combo.currentData()
+        if fps:
+            self.fps = fps
+
+        quality = self.quality_combo.currentData()
+        if quality:
+            self.quality = quality
+
+        self.color_enhancement = self.color_enhance_check.isChecked()
+
+        return {
+            'camera_index': self.camera_index,
+            'resolution': self.resolution,
+            'fps': self.fps,
+            'quality': self.quality,
+            'color_enhancement': self.color_enhancement
+        }
+    
     def apply_settings(self):
         # Сохраняем настройки из текущих комбобоксов
         self.camera_index = self.camera_combo.currentData()
@@ -600,14 +906,201 @@ class VideoSettingsPage(QWidget):
 
 
 class HotkeysSettingsPage(QWidget):
-    """Вкладка горячих клавиш (заглушка)"""
+    """Вкладка настройки горячих клавиш"""
+    hotkeys_changed = pyqtSignal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Настройки горячих клавиш"))
-        layout.addWidget(QLabel("Здесь будут настройки комбинаций клавиш"))
-        layout.addStretch()
+        self.settings = QSettings('DialogApp', 'P2PClient')
+        self.hotkeys = {}  # действие -> строка комбинации
+        self.init_ui()
+        self.load_hotkeys()
 
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # Таблица горячих клавиш
+        self.table = QTableWidget()
+        self.table.setColumnCount(2)
+        self.table.setHorizontalHeaderLabels(["Действие", "Комбинация клавиш"])
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        self.table.setSortingEnabled(True)
+        self.table.doubleClicked.connect(self.edit_hotkey)
+        layout.addWidget(self.table)
+
+        # Панель кнопок
+        btn_layout = QHBoxLayout()
+        self.add_btn = QPushButton("➕ Добавить")
+        self.add_btn.clicked.connect(self.add_hotkey)
+        self.edit_btn = QPushButton("✏️ Изменить")
+        self.edit_btn.clicked.connect(self.edit_hotkey)
+        self.delete_btn = QPushButton("🗑️ Удалить")
+        self.delete_btn.clicked.connect(self.delete_hotkey)
+        self.reset_btn = QPushButton("🔄 Сбросить все")
+        self.reset_btn.clicked.connect(self.reset_defaults)
+
+        btn_layout.addWidget(self.add_btn)
+        btn_layout.addWidget(self.edit_btn)
+        btn_layout.addWidget(self.delete_btn)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.reset_btn)
+        layout.addLayout(btn_layout)
+
+        # Пояснение
+        info_label = QLabel("ℹ️ Горячие клавиши работают, когда окно приложения активно. "
+                            "Для ввода комбинации нажмите нужные клавиши (например, Ctrl+Shift+M).")
+        info_label.setWordWrap(True)
+        info_label.setStyleSheet("color: gray; font-size: 10pt; margin-top: 8px;")
+        layout.addWidget(info_label)
+
+    def load_hotkeys(self):
+        """Загружает сохранённые горячие клавиши из настроек"""
+        self.hotkeys = {}
+        size = self.settings.beginReadArray("hotkeys")
+        for i in range(size):
+            self.settings.setArrayIndex(i)
+            action = self.settings.value("action")
+            shortcut = self.settings.value("shortcut")
+            if action and shortcut:
+                self.hotkeys[action] = shortcut
+        self.settings.endArray()
+        if not self.hotkeys:
+            # Загружаем стандартные
+            self.load_defaults()
+        self.update_table()
+
+    def load_defaults(self):
+        """Стандартные горячие клавиши по умолчанию"""
+        self.hotkeys = {
+            "Отправить сообщение": "Ctrl+Enter",
+            "Ответить на звонок": "Ctrl+Shift+A",
+            "Отклонить звонок": "Ctrl+Shift+R",
+            "Завершить звонок": "Ctrl+Shift+E",
+            "Вкл/Выкл микрофон": "Ctrl+M",
+            "Показать/скрыть окно": "Ctrl+Shift+W",
+            "Открыть настройки": "Ctrl+,",
+            "Выйти из приложения": "Ctrl+Q"
+        }
+
+    def update_table(self):
+        """Обновляет таблицу на основе self.hotkeys"""
+        self.table.setRowCount(len(self.hotkeys))
+        for row, (action, shortcut) in enumerate(self.hotkeys.items()):
+            self.table.setItem(row, 0, QTableWidgetItem(action))
+            self.table.setItem(row, 1, QTableWidgetItem(shortcut))
+        self.table.resizeColumnsToContents()
+
+    def add_hotkey(self):
+        """Диалог добавления новой горячей клавиши"""
+        action, shortcut = self.show_hotkey_dialog()
+        if action and shortcut:
+            if action in self.hotkeys:
+                QMessageBox.warning(self, "Дубликат", f"Действие '{action}' уже существует.")
+                return
+            self.hotkeys[action] = shortcut
+            self.save_hotkeys()
+            self.update_table()
+
+    def edit_hotkey(self):
+        """Редактирование выбранной горячей клавиши"""
+        current_row = self.table.currentRow()
+        if current_row < 0:
+            QMessageBox.information(self, "Редактирование", "Сначала выберите запись.")
+            return
+        action = self.table.item(current_row, 0).text()
+        old_shortcut = self.hotkeys.get(action, "")
+        new_action, new_shortcut = self.show_hotkey_dialog(action, old_shortcut)
+        if new_action and new_shortcut:
+            # Если изменилось действие, удаляем старую запись
+            if new_action != action and new_action in self.hotkeys:
+                QMessageBox.warning(self, "Дубликат", f"Действие '{new_action}' уже существует.")
+                return
+            del self.hotkeys[action]
+            self.hotkeys[new_action] = new_shortcut
+            self.save_hotkeys()
+            self.update_table()
+
+    def delete_hotkey(self):
+        """Удаление выбранной горячей клавиши"""
+        current_row = self.table.currentRow()
+        if current_row < 0:
+            QMessageBox.information(self, "Удаление", "Сначала выберите запись.")
+            return
+        action = self.table.item(current_row, 0).text()
+        reply = QMessageBox.question(self, "Подтверждение",
+                                     f"Удалить горячую клавишу для действия '{action}'?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            del self.hotkeys[action]
+            self.save_hotkeys()
+            self.update_table()
+
+    def reset_defaults(self):
+        """Сброс всех горячих клавиш к стандартным"""
+        reply = QMessageBox.question(self, "Сброс настроек",
+                                     "Вернуть горячие клавиши к значениям по умолчанию?",
+                                     QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.load_defaults()
+            self.save_hotkeys()
+            self.update_table()
+
+    def show_hotkey_dialog(self, current_action="", current_shortcut=""):
+        """Диалог ввода действия и комбинации клавиш. Возвращает (action, shortcut)."""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Горячая клавиша")
+        layout = QVBoxLayout(dialog)
+
+        # Поле для действия
+        layout.addWidget(QLabel("Действие:"))
+        action_edit = QLineEdit()
+        action_edit.setText(current_action)
+        action_edit.setPlaceholderText("Например: Отправить сообщение")
+        layout.addWidget(action_edit)
+
+        # Поле для комбинации
+        layout.addWidget(QLabel("Комбинация клавиш:"))
+        key_edit = QKeySequenceEdit()
+        if current_shortcut:
+            key_edit.setKeySequence(QKeySequence(current_shortcut))
+        layout.addWidget(key_edit)
+
+        # Кнопки
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec_() == QDialog.Accepted:
+            action = action_edit.text().strip()
+            shortcut = key_edit.keySequence().toString()
+            if not action:
+                QMessageBox.warning(dialog, "Ошибка", "Действие не может быть пустым.")
+                return None, None
+            if not shortcut:
+                QMessageBox.warning(dialog, "Ошибка", "Комбинация клавиш не задана.")
+                return None, None
+            return action, shortcut
+        return None, None
+
+    def save_hotkeys(self):
+        """Сохраняет горячие клавиши в QSettings"""
+        self.settings.beginWriteArray("hotkeys")
+        for i, (action, shortcut) in enumerate(self.hotkeys.items()):
+            self.settings.setArrayIndex(i)
+            self.settings.setValue("action", action)
+            self.settings.setValue("shortcut", shortcut)
+        self.settings.endArray()
+        self.settings.sync()
+        self.hotkeys_changed.emit(self.hotkeys)
+
+    def get_hotkeys(self):
+        """Возвращает словарь горячих клавиш для использования в главном окне"""
+        return self.hotkeys.copy()
 
 class NetworkSettingsPage(QWidget):
     """Вкладка сетевых настроек (заглушка)"""
@@ -631,6 +1124,8 @@ class SettingsDialog(QDialog):
         self.setMinimumSize(825, 500)
         self.setMaximumSize(985, 600)
         self.setModal(True)
+
+        #self.general_page = GeneralSettingsPage()
 
         self.settings_data = {
             'input_device': input_device,
@@ -666,7 +1161,8 @@ class SettingsDialog(QDialog):
         main_layout.addWidget(self.stacked_widget, 1)
 
         # Создаём страницы
-        self.general_page = GeneralSettingsPage()
+        self.general_page = GeneralSettingsPage(current_nickname=parent.username if parent else "")
+        self.general_page.nickname_changed.connect(self.on_nickname_changed)
         self.audio_page = AudioSettingsPage(
             current_input=self.settings_data['input_device'],
             current_output=self.settings_data['output_device']
@@ -720,7 +1216,7 @@ class SettingsDialog(QDialog):
         btn_cancel = QPushButton("Отмена")
         btn_apply = QPushButton("Применить")
 
-        # Задаём размеры кнопок (опционально)
+        # Задаём размеры кнопок
         btn_ok.setFixedWidth(80)
         btn_cancel.setFixedWidth(120)
         btn_apply.setFixedWidth(150)
@@ -759,6 +1255,10 @@ class SettingsDialog(QDialog):
         if idx is not None and idx < self.stacked_widget.count():
             self.stacked_widget.setCurrentIndex(idx)
 
+    def on_nickname_changed(self, new_nickname):
+        # Передаём сигнал дальше, если требуется обновить главное окно
+        self.settings_changed.emit({'nickname': new_nickname})
+
     def on_audio_settings_changed(self, settings):
         logger.debug(f"on_audio_settings_changed received: {settings}")
         self.settings_data.update(settings)
@@ -769,6 +1269,14 @@ class SettingsDialog(QDialog):
 
     def apply_settings(self):
         """Применить все настройки (испускает сигнал)"""
+        # Собираем настройки со всех страниц
+        all_settings = {}
+        all_settings.update(self.general_page.get_settings())
+        all_settings.update({
+            'input_device': self.audio_page.input_device,
+            'output_device': self.audio_page.output_device
+        })
+        all_settings.update(self.video_page.get_current_settings())        
         self.settings_changed.emit(self.settings_data)
         logger.info("Настройки применены")
         QMessageBox.information(self, "Настройки", "Настройки сохранены.")
