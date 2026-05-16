@@ -85,6 +85,7 @@ class P2PNetworkClient(QObject):
     connection_status_changed = pyqtSignal(str)
     call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
     video_socket_ready = pyqtSignal(str, object)
+    file_received = pyqtSignal(str, str)  # from_username, save_path
         
     def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()

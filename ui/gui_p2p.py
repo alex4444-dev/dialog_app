@@ -29,6 +29,7 @@ try:
     from call_window import CallWindow
     from video_window import VideoCallWindow
     from storage.database import ClientDatabase
+    from sound_manager import SoundManager
     from core.auth_manager import AuthManager
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
@@ -75,6 +76,8 @@ class P2PMainWindow(QMainWindow):
         self.logger = logging.getLogger('dialog_gui')
         # Для медиа-соединений звонков
         self.media_connections = {}
+
+        self.sound_manager = SoundManager()
 
         # Для звонков
         self.active_calls = {}
@@ -579,6 +582,7 @@ class P2PMainWindow(QMainWindow):
             
         if username not in self.chat_windows:
             self.open_chat(username)
+            self.sound_manager.play('message')
         
         if username in self.chat_windows:
             logger.info(f"P2PMainWindow.handle_message: Добавление сообщения в чат с {username}")
@@ -1372,6 +1376,7 @@ class P2PMainWindow(QMainWindow):
             return
 
         call_id = self.p2p_client.send_call_request(username, call_type)
+        self.sound_manager.play('outgoing_call')
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на звонок')
             return
@@ -1776,7 +1781,15 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.connection_status_changed.connect(self.sig_connection_status.emit)
         if hasattr(self.p2p_client, 'call_received'):
             self.p2p_client.call_received.connect(self.sig_call_received.emit)
+        if hasattr(self.p2p_client, 'file_received'):
+            self.p2p_client.file_received.connect(self.on_file_received)
         
+    def on_file_received(self, from_user, save_path):
+        """Обработка получения файла от другого пользователя"""
+        self.sound_manager.play('file_received')
+        self.system_chat.append(f"📁 Получен файл от {from_user}: {os.path.basename(save_path)}")
+        self.show_notification("Файл получен", f"От {from_user}: {os.path.basename(save_path)}")
+    
     def show_initial_network_info(self):
         """Показать начальную информацию о сети"""
         network_info = self.get_network_info()
@@ -1884,6 +1897,7 @@ class P2PMainWindow(QMainWindow):
                 return
 
             # Создаем окно звонка
+            self.sound_manager.play('incoming_call')
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self,
                                         input_device=self.audio_input_device,
                                         output_device=self.audio_output_device)
@@ -1969,6 +1983,8 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
+            self.sound_manager.play('incoming_call')
+            
             # Создаём окно видеозвонка
             video_window = VideoCallWindow(
                 from_user, call_id, is_outgoing=False, parent=self,
