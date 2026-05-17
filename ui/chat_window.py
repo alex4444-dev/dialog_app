@@ -11,6 +11,7 @@ class ChatWindow(QWidget):
     message_sent = pyqtSignal(str, str)  # username, message
     unread_count_changed = pyqtSignal(str, int)  # username, unread_count
     call_requested = pyqtSignal(str, str)  # username, call_type
+    file_sent = pyqtSignal(str, str)  # username, file_path
     
     def __init__(self, username, host="unknown", port=0):
         super().__init__()
@@ -28,17 +29,7 @@ class ChatWindow(QWidget):
         # Проверяем, что все методы существуют ПОСЛЕ init_ui()
         self.check_methods()
         
-    def check_methods(self):
-        """Проверка наличия всех необходимых методов"""
-        required_methods = ['send_message', 'add_message', 'set_active', 
-                          'mark_as_read', 'update_title']
-        
-        for method_name in required_methods:
-            if not hasattr(self, method_name):
-                logger.error(f"ChatWindow: ОТСУТСТВУЕТ метод {method_name}!")
-            else:
-                logger.info(f"ChatWindow: метод {method_name} присутствует")
-        
+    
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
         try:
@@ -92,6 +83,13 @@ class ChatWindow(QWidget):
             self.message_input.returnPressed.connect(self.send_message)
             self.message_input.setPlaceholderText("Введите сообщение...")
             
+            # Кнопка отправки файла
+            self.file_btn = QPushButton("📎 Файл")
+            self.file_btn.setToolTip("Отправить файл")
+            self.file_btn.clicked.connect(self.send_file)
+            input_layout.addWidget(self.file_btn)
+
+            # кнопка отправки сообщения            
             self.send_btn = QPushButton("📤 Отправить")
             self.send_btn.setObjectName("send_btn")
             self.send_btn.clicked.connect(self.send_message)
@@ -111,14 +109,25 @@ class ChatWindow(QWidget):
         except Exception as e:
             logger.error(f"ChatWindow.init_ui: Ошибка инициализации UI: {e}")
             raise
+
+    def check_methods(self):
+        """Проверка наличия всех необходимых методов"""
+        required_methods = ['send_message', 'add_message', 'set_active', 
+                          'mark_as_read', 'update_title']
         
+        for method_name in required_methods:
+            if not hasattr(self, method_name):
+                logger.error(f"ChatWindow: ОТСУТСТВУЕТ метод {method_name}!")
+            else:
+                logger.info(f"ChatWindow: метод {method_name} присутствует")
+
     def set_active(self, active):
         """Установка флага активности вкладки"""
         logger.debug(f"ChatWindow.set_active: Установка активности {active} для чата с {self.username}")
         self.is_active_tab = active
         if active and self.unread_count > 0:
             self.mark_as_read()
-            
+
     def mark_as_read(self):
         """Пометить все сообщения как прочитанные"""
         if self.unread_count > 0:
@@ -216,3 +225,10 @@ class ChatWindow(QWidget):
             logger.info(f"ChatWindow.clear_chat: История чата с {self.username} очищена")
         except Exception as e:
             logger.error(f"ChatWindow.clear_chat: Ошибка очистки чата: {e}")
+
+
+    def send_file(self):
+        from PyQt5.QtWidgets import QFileDialog
+        file_path, _ = QFileDialog.getOpenFileName(self, "Выберите файл для отправки")
+        if file_path:
+            self.file_sent.emit(self.username, file_path)

@@ -990,12 +990,6 @@ class VideoCallWindow(QWidget):
         if socket is None:
             return
         self.audio_core.set_socket(socket)
-        # Всегда запускаем аудио, start() проверит is_running и при необходимости создаст потоки
-        # Убедимся, что устройства не сброшены
-        if hasattr(self, 'input_device') and self.input_device is not None:
-            self.audio_core.input_device = self.input_device
-        if hasattr(self, 'output_device') and self.output_device is not None:
-            self.audio_core.output_device = self.output_device
         self.audio_core.start()
         logger.info(f"🎤 Аудио-сокет установлен и запущен для звонка {self.call_id}")
         
@@ -1005,7 +999,8 @@ class VideoCallWindow(QWidget):
             self.capture_thread.start()
         # Аудио уже должно быть запущено в set_audio_socket, но на всякий случай проверим
         if not self.audio_core.is_running and self.audio_core.audio_socket:
-            self.audio_core.start()
+            #self.audio_core.start()
+            logger.info(f"🎤 Аудио запущено после подтверждения звонка {self.call_id}")
         self.status_label.setText("🟢 Видеозвонок активен")
         self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
         

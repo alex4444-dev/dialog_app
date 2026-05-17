@@ -16,7 +16,7 @@ import json
 from crypto import CryptoManager
 from secure_channel import SecureChannel
 from typing import Dict, List, Optional, Callable
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
 
 
 import logging
@@ -86,7 +86,9 @@ class P2PNetworkClient(QObject):
     call_received = pyqtSignal(str, str, str, str)  # action, username, call_type, call_id
     video_socket_ready = pyqtSignal(str, object)
     file_received = pyqtSignal(str, str)  # from_username, save_path
-        
+    file_progress = pyqtSignal(str, int, int)  # file_id, sent_bytes, total_bytes
+
+    
     def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()
         self.db = db
@@ -124,6 +126,8 @@ class P2PNetworkClient(QObject):
         self.media_sockets = {}  # call_id -> socket
         self.media_connections = {}  # call_id -> media_info
         self.call_requests = {}  # call_id -> call_info
+        self.active_file_transfers = {}  # file_id -> transfer_info
+        self.settings = QSettings('DialogApp', 'P2PClient')
 
     def _get_local_ip(self) -> str:
         """Определяет IP-адрес машины в локальной сети (не localhost)."""
@@ -1485,6 +1489,14 @@ class P2PNetworkClient(QObject):
             self._handle_call_request(data)
         elif message_type == 'call_response':  
             self._handle_call_response(data)
+        elif message_type == 'file_request':
+            self._handle_file_request(data, peer_id)
+        elif message_type == 'file_chunk':
+            self._handle_file_chunk(data, peer_id)
+        elif message_type == 'file_complete':
+            self._handle_file_complete(data, peer_id)
+        elif message_type == 'file_ack':
+            self._handle_file_ack(data, peer_id)
         elif message_type == 'peer_exchange':  
             self._handle_peer_exchange(data, peer_id)
         elif message_type == 'ping':
@@ -2598,6 +2610,190 @@ class P2PNetworkClient(QObject):
 
         except Exception as e:
             logger.error(f"❌ Ошибка закрытия медиа-соединения: {e}")
+        
+    # Файлы
+    def send_file(self, to_username: str, file_path: str) -> bool:
+        """Отправка файла пользователю"""
+        import os, uuid
+        if not os.path.exists(file_path):
+            logger.error(f"Файл не найден: {file_path}")
+            return False
+
+        # Найти peer по username
+        target_peer = None
+        for peer_id, pinfo in self.connected_peers.items():
+            if pinfo.get('username') == to_username:
+                target_peer = pinfo
+                break
+        if not target_peer:
+            logger.error(f"Пользователь {to_username} не в сети")
+            return False
+
+        file_size = os.path.getsize(file_path)
+        max_size_mb = self.settings.value('max_file_size_mb', 100, type=int)
+        if file_size > max_size_mb * 1024 * 1024:
+            logger.error(f"Файл слишком большой: {file_size} байт (макс {max_size_mb} МБ)")
+            return False
+
+        file_name = os.path.basename(file_path)
+        file_id = str(uuid.uuid4())
+
+        # Сохраняем информацию о передаче
+        self.active_file_transfers[file_id] = {
+            'peer': target_peer,
+            'to_username': to_username,
+            'file_path': file_path,
+            'file_size': file_size,
+            'sent_bytes': 0,
+            'status': 'sending'
+        }
+
+        # Отправляем запрос на передачу файла
+        request_msg = {
+            'type': 'file_request',
+            'file_id': file_id,
+            'file_name': file_name,
+            'file_size': file_size,
+            'from': self.username,
+            'to': to_username,
+            'timestamp': time.time()
+        }
+        if not self._send_to_peer(target_peer, request_msg):
+            logger.error("Не удалось отправить запрос на передачу файла")
+            return False
+
+        # Запускаем поток для отправки чанков
+        threading.Thread(target=self._send_file_chunks, args=(file_id,), daemon=True).start()
+        logger.info(f"Начата отправка файла {file_name} (ID {file_id}) пользователю {to_username}")
+        return True
+    
+    def _send_file_chunks(self, file_id: str, chunk_size=8192):
+        transfer = self.active_file_transfers.get(file_id)
+        if not transfer:
+            return
+        file_path = transfer['file_path']
+        peer = transfer['peer']
+        file_size = transfer['file_size']
+        try:
+            with open(file_path, 'rb') as f:
+                offset = 0
+                while offset < file_size and file_id in self.active_file_transfers:
+                    f.seek(offset)
+                    chunk = f.read(chunk_size)
+                    if not chunk:
+                        break
+                    import base64
+                    b64_data = base64.b64encode(chunk).decode('ascii')
+                    chunk_msg = {
+                        'type': 'file_chunk',
+                        'file_id': file_id,
+                        'offset': offset,
+                        'data': b64_data,
+                        'size': len(chunk)
+                    }
+                    if not self._send_to_peer(peer, chunk_msg):
+                        logger.error(f"Ошибка отправки чанка файла {file_id} на офсете {offset}")
+                        break
+                    offset += len(chunk)
+                    transfer['sent_bytes'] = offset
+                    self.file_progress.emit(file_id, offset, file_size)
+                    time.sleep(0.005)  # небольшая задержка, чтобы не перегружать сеть
+            # После отправки всех чанков – уведомляем о завершении
+            complete_msg = {'type': 'file_complete', 'file_id': file_id, 'status': 'ok'}
+            self._send_to_peer(peer, complete_msg)
+            logger.info(f"Файл {file_path} отправлен, ID {file_id}")
+        except Exception as e:
+            logger.error(f"Ошибка отправки файла {file_id}: {e}")
+        finally:
+            if file_id in self.active_file_transfers:
+                del self.active_file_transfers[file_id]
+    
+    def _handle_file_request(self, data: dict, peer_id: str):
+        """Обработка запроса на получение файла"""
+        file_id = data['file_id']
+        file_name = data['file_name']
+        file_size = data['file_size']
+        from_user = data['from']
+
+        # Проверка максимального размера
+        max_size_mb = self.settings.value('max_file_size_mb', 100, type=int)
+        if file_size > max_size_mb * 1024 * 1024:
+            logger.warning(f"Файл {file_name} слишком большой ({file_size} байт)")
+            reject_msg = {'type': 'file_complete', 'file_id': file_id, 'status': 'too_large'}
+            self._send_to_peer(self.connected_peers.get(peer_id, {}), reject_msg)
+            return
+
+        # Папка для сохранения
+        download_folder = self.settings.value('download_folder')
+        if not download_folder:
+            download_folder = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
+            # Сохраняем это значение в настройки, чтобы в следующий раз не вычислять
+            self.settings.setValue('download_folder', download_folder)
+            self.settings.sync()
+        os.makedirs(download_folder, exist_ok=True)
+        save_path = os.path.join(download_folder, file_name)
+        counter = 1
+        while os.path.exists(save_path):
+            name, ext = os.path.splitext(file_name)
+            save_path = os.path.join(download_folder, f"{name}_{counter}{ext}")
+            counter += 1
+
+        self.active_file_transfers[file_id] = {
+            'save_path': save_path,
+            'file_size': file_size,
+            'received_bytes': 0,
+            'file_handle': open(save_path, 'wb'),
+            'from_user': from_user,
+            'peer_id': peer_id,
+            'status': 'receiving'
+        }
+
+        # Отправляем подтверждение готовности
+        ack_msg = {'type': 'file_ack', 'file_id': file_id, 'status': 'ready'}
+        self._send_to_peer(self.connected_peers.get(peer_id, {}), ack_msg)
+        logger.info(f"Начинаем приём файла {file_name} (ID {file_id}) от {from_user}")
+
+    def _handle_file_chunk(self, data: dict, peer_id: str):
+        file_id = data['file_id']
+        offset = data['offset']
+        b64_data = data['data']
+        import base64
+        chunk = base64.b64decode(b64_data)
+        transfer = self.active_file_transfers.get(file_id)
+        if not transfer or transfer['status'] != 'receiving':
+            logger.warning(f"Неожиданный чанк для {file_id}")
+            return
+        try:
+            transfer['file_handle'].seek(offset)
+            transfer['file_handle'].write(chunk)
+            transfer['received_bytes'] += len(chunk)
+            self.file_progress.emit(file_id, transfer['received_bytes'], transfer['file_size'])
+        except Exception as e:
+            logger.error(f"Ошибка записи чанка файла {file_id}: {e}")
+
+    def _handle_file_complete(self, data: dict, peer_id: str):
+        file_id = data['file_id']
+        status = data.get('status', 'ok')
+        transfer = self.active_file_transfers.get(file_id)
+        if transfer:
+            transfer['file_handle'].close()
+            if status == 'ok':
+                logger.info(f"Файл {transfer['save_path']} успешно получен")
+                self.file_received.emit(transfer['from_user'], transfer['save_path'])
+            else:
+                logger.warning(f"Передача файла {file_id} завершена с ошибкой: {status}")
+                if os.path.exists(transfer['save_path']):
+                    os.remove(transfer['save_path'])
+            del self.active_file_transfers[file_id]
+        else:
+            logger.warning(f"Файл {file_id} уже завершён или не существует")
+
+    def _handle_file_ack(self, data: dict, peer_id: str):
+        """Подтверждение готовности к приёму (опционально)"""
+        file_id = data.get('file_id')
+        status = data.get('status')
+        if status == 'ready':
+            logger.debug(f"Собеседник готов принять файл {file_id}")
         
     # Шифрование
     def _perform_key_exchange(self, peer_id: str, sock: socket.socket):

@@ -1106,6 +1106,7 @@ class HotkeysSettingsPage(QWidget):
 class NetworkSettingsPage(QWidget):
     """Вкладка сетевых настроек (P2P, bootstrap, STUN/TURN)"""
     network_settings_changed = pyqtSignal(dict)
+    network_restart_requested = pyqtSignal(dict)  
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1186,7 +1187,19 @@ class NetworkSettingsPage(QWidget):
         self.test_bootstrap_btn.clicked.connect(self.test_bootstrap_connections)
         layout.addWidget(self.test_bootstrap_btn)
 
+        # Кнопка сохранения и перезапуска сети
+        self.restart_btn = QPushButton("🔄 Сохранить и перезапустить сеть")
+        self.restart_btn.setToolTip("Сохранить порт и bootstrap-узлы, затем перезапустить P2P-клиент")
+        self.restart_btn.clicked.connect(self.on_restart_clicked)
+        layout.addWidget(self.restart_btn)
+
         layout.addStretch()
+
+    def on_restart_clicked(self):
+        """Сохраняет настройки и запрашивает перезапуск у главного окна"""
+        self.save_settings()                     # сохраняем порт и узлы в QSettings
+        settings = self.get_settings()
+        self.network_restart_requested.emit(settings)
 
     
     def _load_defaults_from_config(self):
@@ -1396,7 +1409,7 @@ class SettingsDialog(QDialog):
         self.setMaximumSize(985, 600)
         self.setModal(True)
 
-        #self.general_page = GeneralSettingsPage()
+        
 
         self.settings_data = {
             'input_device': input_device,
@@ -1441,6 +1454,7 @@ class SettingsDialog(QDialog):
         self.video_page = VideoSettingsPage()
         self.hotkeys_page = HotkeysSettingsPage()
         self.network_page = NetworkSettingsPage()
+        self.network_page.network_restart_requested.connect(self.on_network_restart_requested)
 
         # Оборачиваем каждую страницу в QScrollArea
         from PyQt5.QtWidgets import QScrollArea
@@ -1538,6 +1552,10 @@ class SettingsDialog(QDialog):
         self.settings_data.update(settings)
         logger.debug(f"Видеонастройки обновлены: {settings}")
 
+    def on_network_restart_requested(self, settings):
+        # Передаём запрос в главное окно
+        self.settings_changed.emit({'network_restart': settings})
+    
     def apply_settings(self):
         """Применить все настройки (испускает сигнал)"""
         # Собираем настройки со всех страниц
@@ -1548,7 +1566,9 @@ class SettingsDialog(QDialog):
             'output_device': self.audio_page.output_device
         })
         all_settings.update(self.video_page.get_current_settings())        
-        all_settings.update(self.network_page.get_settings())
+        all_settings.update(self.hotkeys_page.get_hotkeys())
+        # СЕТЕВЫЕ НАСТРОЙКИ НЕ ДОБАВЛЯЕМ – они сохранятся сами через save_settings(),
+        # но перезапуск не нужен
         self.settings_changed.emit(all_settings)
         logger.info("Настройки применены")
         QMessageBox.information(self, "Настройки", "Настройки сохранены.")

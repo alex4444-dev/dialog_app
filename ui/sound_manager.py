@@ -1,8 +1,8 @@
-# sound_manager.py
 import logging
 import os
-from PyQt5.QtMultimedia import QSound
 from PyQt5.QtCore import QSettings
+from playsound import playsound
+import threading
 
 logger = logging.getLogger('dialog_gui')
 
@@ -24,10 +24,12 @@ class SoundManager:
         if not sound_file or not os.path.exists(sound_file):
             logger.debug(f"Звуковой файл не найден: {sound_file}")
             return
-        try:
-            QSound.play(sound_file)
-        except Exception as e:
-            logger.error(f"Ошибка воспроизведения звука {sound_name}: {e}")
+        def _play():
+            try:
+                playsound(sound_file)
+            except Exception as e:
+                logger.error(f"Ошибка воспроизведения звука {sound_name}: {e}")
+        threading.Thread(target=_play, daemon=True).start()
 
     def set_enabled(self, enabled: bool):
         self.enabled = enabled

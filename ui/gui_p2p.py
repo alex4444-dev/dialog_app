@@ -9,7 +9,7 @@ import socket
 from typing import List, Dict, Tuple
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
-                             QMessageBox, QStatusBar, QTextEdit, QDialog,
+                             QMessageBox, QStatusBar, QTextEdit, QDialog, QFileDialog,
                              QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings
 from PyQt5.QtGui import QIcon, QKeySequence
@@ -267,7 +267,27 @@ class P2PMainWindow(QMainWindow):
                     self.p2p_client.set_username(new_nick)
                     self.p2p_client.broadcast_self_info()
 
-        
+        # Обновляем настройки файлов (папка сохранения, максимальный размер)
+        if 'download_folder' in settings:
+            new_download_folder = settings['download_folder']
+            # Сохраняем в QSettings на всякий случай (хотя они уже сохранены)
+            self.settings.setValue('download_folder', new_download_folder)
+            # Можно также обновить переменную в главном окне
+            self.download_folder = new_download_folder
+            # Если нужно уведомить p2p_client (необязательно, он сам прочитает из QSettings)
+            if self.p2p_client:
+                self.p2p_client.settings.setValue('download_folder', new_download_folder)
+                self.p2p_client.settings.sync()
+
+        if 'max_file_size_mb' in settings:
+            new_max_size = settings['max_file_size_mb']
+            self.settings.setValue('max_file_size_mb', new_max_size)
+            self.max_file_size_mb = new_max_size
+            if self.p2p_client:
+                self.p2p_client.settings.setValue('max_file_size_mb', new_max_size)
+                self.p2p_client.settings.sync()
+
+
         # горячие клавиши
         if 'hotkeys' in settings:
             # Перезагружаем горячие клавиши (сначала удаляем старые)
@@ -275,20 +295,26 @@ class P2PMainWindow(QMainWindow):
                 child.deleteLater()
             self.setup_hotkeys()
 
-        # сеть
-        if 'network_port' in settings or 'bootstrap_nodes' in settings:
-            # Для применения этих настроек требуется перезапуск P2P клиента
-            reply = QMessageBox.question(self, "Применить сетевые настройки",
-                                        "Изменение сетевых параметров требует перезапуска P2P сети.\n"
-                                        "Перезапустить сейчас?",
-                                        QMessageBox.Yes | QMessageBox.No)
-            if reply == QMessageBox.Yes:
-                # Перезапускаем P2P клиент с новыми настройками
-                self.p2p_client.stop()
-                # Применить порт и bootstrap узлы
-                self.p2p_client.listen_port = settings.get('network_port', self.p2p_client.listen_port)
-                self.p2p_client.bootstrap_nodes = settings.get('bootstrap_nodes', self.p2p_client.bootstrap_nodes)
-                self.p2p_client.start()
+        # сеть          
+        if 'network_restart' in settings:
+            net_settings = settings['network_restart']
+            # Проверяем, есть ли активные звонки
+            if self.active_calls:
+                reply = QMessageBox.warning(
+                    self, "Активные звонки",
+                    "Перезапуск сети прервёт текущие звонки. Продолжить?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    return
+            # Перезапускаем P2P клиент с новыми настройками
+            self.p2p_client.stop()
+            if 'network_port' in net_settings:
+                self.p2p_client.listen_port = net_settings['network_port']
+            if 'bootstrap_nodes' in net_settings:
+                self.p2p_client.bootstrap_nodes = net_settings['bootstrap_nodes']
+            self.p2p_client.start()
+            self.system_chat.append("🌐 Сеть перезапущена с новыми параметрами")
 
 
     def focus_message_input(self):
@@ -890,6 +916,7 @@ class P2PMainWindow(QMainWindow):
             chat_window.message_sent.connect(self.on_message_sent)
             chat_window.unread_count_changed.connect(self.on_unread_count_changed)
             chat_window.call_requested.connect(self.on_call_requested)
+            chat_window.file_sent.connect(self.on_file_sent)
 
             # Добавляем вкладку
             tab_index = self.tabs.addTab(chat_window, f"💬 {clean_username}")
@@ -904,6 +931,8 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.open_chat: Ошибка открытия чата: {e}")
             import traceback
             logger.error(traceback.format_exc())
+
+
 
     def on_tab_changed(self, index):
         """Обработчик изменения активной вкладки"""
@@ -1376,10 +1405,11 @@ class P2PMainWindow(QMainWindow):
             return
 
         call_id = self.p2p_client.send_call_request(username, call_type)
-        self.sound_manager.play('outgoing_call')
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на звонок')
             return
+
+        self.sound_manager.play('outgoing_call')
 
         # Создаём окно аудиозвонка
         call_window = CallWindow(
@@ -1783,7 +1813,16 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.call_received.connect(self.sig_call_received.emit)
         if hasattr(self.p2p_client, 'file_received'):
             self.p2p_client.file_received.connect(self.on_file_received)
-        
+
+    def on_file_sent(self, username, file_path):
+        """Вызывается, когда пользователь выбрал файл в окне чата"""
+        if self.p2p_client:
+            self.p2p_client.send_file(username, file_path)
+        else:
+            QMessageBox.warning(self, "Ошибка", "P2P клиент не инициализирован")
+
+
+
     def on_file_received(self, from_user, save_path):
         """Обработка получения файла от другого пользователя"""
         self.sound_manager.play('file_received')
@@ -1983,9 +2022,9 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
-            self.sound_manager.play('incoming_call')
+            #self.sound_manager.play('incoming_call')
             
-            # Создаём окно видеозвонка
+            # Создаём окно видеозвонка 
             video_window = VideoCallWindow(
                 from_user, call_id, is_outgoing=False, parent=self,
                 camera_index=camera_index,
@@ -1996,6 +2035,9 @@ class P2PMainWindow(QMainWindow):
                 input_device=self.audio_input_device,
                 output_device=self.audio_output_device
             )
+            
+            
+
             video_window.call_ended.connect(self.end_call)
             video_window.call_accepted.connect(self.accept_call)
             video_window.call_rejected.connect(self.reject_call)
@@ -2022,6 +2064,7 @@ class P2PMainWindow(QMainWindow):
             video_window.show()
             video_window.raise_()
             video_window.activateWindow()
+            
 
             # Функция для подключения видео (как было раньше)
             def try_connect_video(attempt=0):
@@ -2102,6 +2145,8 @@ class P2PMainWindow(QMainWindow):
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на видеозвонок')
             return
 
+        #self.sound_manager.play('outgoing_call')
+
         # Создаём окно видеозвонка
         video_window = VideoCallWindow(
             username, call_id, is_outgoing=True, parent=self,
@@ -2113,6 +2158,8 @@ class P2PMainWindow(QMainWindow):
             input_device=self.audio_input_device,
             output_device=self.audio_output_device
         )
+        
+        
         video_window.call_ended.connect(self.end_call)
 
         # Подключаем сигнал готовности видео-сокета (если нужно)
@@ -2146,9 +2193,11 @@ class P2PMainWindow(QMainWindow):
         video_window.show()
         video_window.raise_()
         video_window.activateWindow()
+        
 
         logger.info(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
         self.system_chat.append(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
+
 
     def _retry_audio_socket(self, video_window, call_id, username, is_outgoing):
         audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=is_outgoing)
