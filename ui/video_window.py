@@ -990,20 +990,22 @@ class VideoCallWindow(QWidget):
         if socket is None:
             return
         self.audio_core.set_socket(socket)
-        self.audio_core.start()
+        #self.audio_core.start()
         logger.info(f"🎤 Аудио-сокет установлен и запущен для звонка {self.call_id}")
         
     def start_call(self):
         """Начать видеозвонок после получения подтверждения"""
         if self.video_enabled and self.capture_thread and not self.capture_thread.isRunning():
             self.capture_thread.start()
-        # Аудио уже должно быть запущено в set_audio_socket, но на всякий случай проверим
-        if not self.audio_core.is_running and self.audio_core.audio_socket:
-            #self.audio_core.start()
-            logger.info(f"🎤 Аудио запущено после подтверждения звонка {self.call_id}")
-        self.status_label.setText("🟢 Видеозвонок активен")
-        self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
         
+        # Запускаем аудио только при принятии звонка
+        if not self.audio_core.is_running and self.audio_core.audio_socket:
+            # Запускаем аудио
+            self.audio_core.start()
+        
+        if self.video_socket_set:
+            self.status_label.setText("🟢 Видеозвонок активен")
+            self.status_label.setStyleSheet("font-size: 16px; color: #ffffff;")
 
     def accept_call(self):
         """Принять видеозвонок"""
@@ -1116,8 +1118,8 @@ class AudioCallCore:
         self.audio_socket = sock
         if self.audio_socket and hasattr(self.audio_socket, 'settimeout'):
             self.audio_socket.settimeout(2.0)
-        if self.is_running:
-            self.start_streams()
+       # if self.is_running:
+       #     self.start_streams()
 
     def start_streams(self):
         if self._streams_started:
@@ -1349,7 +1351,25 @@ class AudioCallCore:
     def start(self):
         self.is_running = True
         if self.audio_socket:
+            # Проверим, жив ли сокет
+            try:
+                if isinstance(self.audio_socket, SecureChannel):
+                    # SecureChannel: дополнительная проверка не требуется,
+                    # ошибки будут обработаны в recv_loop
+                    pass
+                else:
+                    # Обычный сокет: проверяем fileno()
+                    self.audio_socket.fileno()
+            except (OSError, ValueError, AttributeError) as e:
+                logger.warning(f"AudioCallCore: сокет недействителен ({e}), аудио не будет запущено")
+                self.audio_socket = None
+                self.is_running = False
+                return
             self.start_streams()
+        else:
+            logger.warning("AudioCallCore: попытка запуска без аудиосокета")
+            self.is_running = False
+        
 
     def stop(self):
         self._streams_started = False
