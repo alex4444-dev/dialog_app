@@ -14,20 +14,22 @@ class SecureChannel:
         self.crypto = crypto
         self._recv_buffer = b''
         self._closed = False
+        # Устанавливаем таймаут по умолчанию (можно будет изменить через settimeout)
+        self.sock.settimeout(None)
+
+    def settimeout(self, timeout: float):
+        """Устанавливает таймаут для внутреннего сокета."""
+        self.sock.settimeout(timeout)
 
     def send(self, data: bytes):
-        """Отправляет данные, предварительно шифруя."""
         if self._closed:
             raise ConnectionError("Канал закрыт")
         encrypted = self.crypto.encrypt_packet(data)
-        # добавляем длину пакета
         packet = struct.pack('!I', len(encrypted)) + encrypted
         self.sock.sendall(packet)
 
-    def recv(self, timeout: float = None) -> bytes:
-        """Принимает один полный пакет, расшифровывает и возвращает."""
-        if timeout is not None:
-            self.sock.settimeout(timeout)
+    def recv(self) -> bytes:
+        """Принимает один полный пакет (без аргумента timeout, таймаут задан ранее)."""
         try:
             # Читаем длину пакета
             while len(self._recv_buffer) < 4:
@@ -46,12 +48,12 @@ class SecureChannel:
             self._recv_buffer = self._recv_buffer[4+pkt_len:]
             return self.crypto.decrypt_packet(encrypted)
         except socket.timeout:
-            raise
+            raise   # пробрасываем выше для обработки
         except Exception as e:
             logger.error(f"Ошибка приёма: {e}")
             self.close()
             raise
- 
+
     def close(self):
         self._closed = True
         self.sock.close()

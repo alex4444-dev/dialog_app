@@ -773,7 +773,7 @@ class VideoCallWindow(QWidget):
         while self.video_socket_set and self.video_socket:
             try:
                 if self.video_secure_mode:
-                    packet = self.video_socket.recv(timeout=0.5)
+                    packet = self.video_socket.recv()
                     if not packet:
                         break
                     if len(packet) < 12:
@@ -966,6 +966,8 @@ class VideoCallWindow(QWidget):
             self.receive_thread.join(timeout=1.0)
 
         self.video_socket = socket
+        if hasattr(socket, 'settimeout'):
+            socket.settimeout(0.5)
         if hasattr(socket, 'fileno'):
             self.video_secure_mode = False
         else:
@@ -1118,8 +1120,7 @@ class AudioCallCore:
         self.audio_socket = sock
         if self.audio_socket and hasattr(self.audio_socket, 'settimeout'):
             self.audio_socket.settimeout(2.0)
-       # if self.is_running:
-       #     self.start_streams()
+       
 
     def start_streams(self):
         if self._streams_started:
@@ -1228,7 +1229,7 @@ class AudioCallCore:
             # Защищённый канал: используем простой приём с таймаутом
             while self.is_running and not self._stop_requested and self.audio_socket:
                 try:
-                    packet = self.audio_socket.recv(timeout=0.5)
+                    packet = self.audio_socket.recv()
                     if not packet:
                         break
                     if len(packet) < 4:
