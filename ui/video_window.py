@@ -682,32 +682,30 @@ class VideoCallWindow(QWidget):
         return cameras
     
     def handle_frame_ready(self, frame):
-        """Обработка готового кадра с камеры"""
         try:
             if frame is not None:
-                # Обработка кадра
                 if self.color_enhancement_enabled:
                     self.video_processor.put_frame(frame)
                     processed = self.video_processor.get_processed_frame()
                     if processed is not None:
                         self.local_frame = processed
                     else:
-                        # Если обработчик не успел, используем исходный кадр
+                        # Если обработчик не успел – изменяем размер исходного кадра
                         self.local_frame = cv2.resize(frame, self.resolution)
                 else:
                     # Простая обработка без улучшения цветов
+                    target_width, target_height = self.resolution   # <-- определяем переменные
                     h, w = frame.shape[:2]
-                    if w != 640 or h != 480:
-                        frame = cv2.resize(frame, (640, 480))
+                    if w != target_width or h != target_height:
+                        frame = cv2.resize(frame, (target_width, target_height))
                     self.local_frame = frame
                 
                 # Отправка по сети
                 if self.video_socket and self.video_socket_set:
                     self.send_video_frame(self.local_frame)
-                    
         except Exception as e:
             logger.error(f"Ошибка обработки кадра: {e}")
-    
+
     def send_video_frame(self, frame):
         if frame is None: 
             return
@@ -734,91 +732,7 @@ class VideoCallWindow(QWidget):
                 self.video_socket_set = False
 
     def receive_video_loop(self):
-        """Цикл приёма видео-пакетов с блокировкой для защиты сокета"""
-        buffer = b''
-        while self.video_socket_set and self.video_socket:
-            try:
-                # === Блокировка только на момент чтения из сокета ===
-                with self.video_socket_lock:
-                    if not self.video_socket:      # сокет мог быть изменён
-                        break
-                    if self.video_secure_mode:
-                        # SecureChannel.recv() сам читает полный пакет с учётом длины
-                        packet = self.video_socket.recv()
-                        # Если пришёл пустой пакет – соединение закрыто
-                        if not packet:
-                            self.video_socket_set = False
-                            break
-                        # SecureChannel возвращает уже расшифрованные данные (без заголовка SecureChannel)
-                        # Переменная packet содержит: [data_size(4)][width(4)][height(4)][jpeg_data]
-                        if len(packet) < 12:
-                            continue
-                        data_size, width, height = struct.unpack('III', packet[:12])
-                        if len(packet) >= 12 + data_size:
-                            jpeg_data = packet[12:12+data_size]
-                            nparr = np.frombuffer(jpeg_data, np.uint8)
-                            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                            if frame is not None:
-                                try:
-                                    if self.remote_frame_queue.full():
-                                        self.remote_frame_queue.get_nowait()
-                                    self.remote_frame_queue.put_nowait(frame)
-                                except queue.Full:
-                                    pass
-                        continue
-                    else:
-                        # Обычный сокет: читаем чанк
-                        chunk = self.video_socket.recv(4096)
-                # === Конец защищённого блока ===
-
-                if not chunk:
-                    # Соединение закрыто удалённой стороной
-                    with self.video_socket_lock:
-                        self.video_socket_set = False
-                    break
-
-                buffer += chunk
-
-                # Обработка буфера: извлекаем полные пакеты
-                while len(buffer) >= 12:
-                    data_size, width, height = struct.unpack('III', buffer[:12])
-                    if data_size <= 0 or data_size > 10 * 1024 * 1024:  # лимит 10 МБ
-                        # Неверный заголовок – сбросим байт и попробуем синхронизироваться заново
-                        buffer = buffer[1:]
-                        continue
-                    if len(buffer) >= 12 + data_size:
-                        jpeg_data = buffer[12:12+data_size]
-                        nparr = np.frombuffer(jpeg_data, np.uint8)
-                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                        if frame is not None:
-                            try:
-                                if self.remote_frame_queue.full():
-                                    self.remote_frame_queue.get_nowait()
-                                self.remote_frame_queue.put_nowait(frame)
-                            except queue.Full:
-                                pass
-                        buffer = buffer[12+data_size:]
-                    else:
-                        break
-
-            except socket.timeout:
-                # Таймаут – нормально, продолжаем цикл
-                continue
-            except (ConnectionError, BrokenPipeError, OSError, AttributeError) as e:
-                logger.warning(f"Ошибка в receive_video_loop: {e}")
-                with self.video_socket_lock:
-                    self.video_socket_set = False
-                break
-            except Exception as e:
-                logger.error(f"Неожиданная ошибка в receive_video_loop: {e}", exc_info=True)
-                with self.video_socket_lock:
-                    self.video_socket_set = False
-                break
-
-        logger.info("receive_video_loop завершён")
-
-    def receive_video_loop(self):
-        """Цикл приёма видео-пакетов (работает с SecureChannel и обычным сокетом)."""
+        """Цикл приёма видео-пакетов (без блокировок, полагается на остановку потока)."""
         buffer = b''
         while self.video_socket_set and self.video_socket:
             try:
@@ -847,6 +761,9 @@ class VideoCallWindow(QWidget):
                     buffer += chunk
                     while len(buffer) >= 12:
                         data_size, width, height = struct.unpack('III', buffer[:12])
+                        if data_size <= 0 or data_size > 10 * 1024 * 1024:
+                            buffer = buffer[1:]
+                            continue
                         if len(buffer) >= 12 + data_size:
                             jpeg_data = buffer[12:12+data_size]
                             nparr = np.frombuffer(jpeg_data, np.uint8)
@@ -866,7 +783,7 @@ class VideoCallWindow(QWidget):
             except Exception as e:
                 logger.error(f"Ошибка в receive_video_loop: {e}")
                 break
-        self.video_socket_set = False
+        logger.info("receive_video_loop завершён")
 
     def update_ui(self):
         """Обновление UI"""
@@ -1095,23 +1012,28 @@ class VideoCallWindow(QWidget):
         """Отклонить видеозвонок"""
         self.call_rejected.emit(self.call_id)
         self.end_call()
-        self.close()
-    
+        
     def end_call(self):
-        """Завершить видеозвонок"""
         self._is_closing = True
         self.stop_video_capture()
         self.audio_core.stop()
 
+        # Сигнал остановки для потока приёма
+        self.video_socket_set = False
+        # Дожидаемся завершения потока приёма (он больше не использует сокет)
+        if hasattr(self, 'receive_thread') and self.receive_thread:
+            self.receive_thread.join(timeout=1.0)
+            self.receive_thread = None
+
+        # Теперь можно безопасно закрыть сокет
         with self.video_socket_lock:
-            self.video_socket_set = False
             if self.video_socket:
                 try:
                     self.video_socket.close()
                 except:
                     pass
                 self.video_socket = None
-                
+
         self.call_ended.emit(self.call_id)
         self.close()
     
@@ -1121,12 +1043,21 @@ class VideoCallWindow(QWidget):
             return
         self._is_closing = True
         self.stop_video_capture()
-        self.video_socket_set = False
-        if self.video_socket:
-            self.video_socket.close()
         self.audio_core.stop()
+
+        self.video_socket_set = False
         if hasattr(self, 'receive_thread') and self.receive_thread:
             self.receive_thread.join(timeout=1.0)
+            self.receive_thread = None
+
+        with self.video_socket_lock:
+            if self.video_socket:
+                try:
+                    self.video_socket.close()
+                except:
+                    pass
+                self.video_socket = None
+
         event.accept()
     
     def paintEvent(self, event):
