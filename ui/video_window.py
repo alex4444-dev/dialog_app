@@ -372,20 +372,19 @@ class VideoCallWindow(QWidget):
         # Компоненты
         self.capture_thread = None
         self.video_processor = VideoProcessor()        
-        self.remote_frame_queue = queue.Queue(maxsize=5)
+        self.remote_frame_queue = queue.Queue(maxsize=10)
+        
         
         # Сокеты для видео
         self.video_socket = None
         self.video_socket_set = False
         self.receive_thread = None
-        self.socket_check_timer = QTimer()
-        self.socket_check_timer.timeout.connect(self.check_video_socket)
-        self.socket_attempts = 0
-        self.max_socket_attempts = 5
+        
+        self.video_socket_lock = threading.Lock()
                 
         # Буферы для видео
         self.local_frame = None
-        self.display_timer = QTimer()
+        
         
         # UI
         self.init_ui()
@@ -710,71 +709,114 @@ class VideoCallWindow(QWidget):
             logger.error(f"Ошибка обработки кадра: {e}")
     
     def send_video_frame(self, frame):
-        if frame is None or not self.video_socket or not self.video_socket_set:
+        if frame is None: 
             return
-        try:
-            # Сжатие JPEG
-            encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
-            success, encoded = cv2.imencode('.jpg', frame, encode_param)
-            if not success:
+        with self.video_socket_lock:
+            if not self.video_socket or not self.video_socket_set:
                 return
-            data = encoded.tobytes()
-            data_size = len(data)
-            # Заголовок: длина, ширина, высота
-            header = struct.pack('III', data_size, frame.shape[1], frame.shape[0])
-            full_packet = header + data
-            if self.video_secure_mode:
-                self.video_socket.send(full_packet)
-            else:
-                self.video_socket.sendall(full_packet)
-        except Exception as e:
-            logger.error(f"Ошибка отправки видео: {e}")
-            self.video_socket_set = False
+            try:
+                # Сжатие JPEG
+                encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), self.quality]
+                success, encoded = cv2.imencode('.jpg', frame, encode_param)
+                if not success:
+                    return
+                data = encoded.tobytes()
+                data_size = len(data)
+                # Заголовок: длина, ширина, высота
+                header = struct.pack('III', data_size, frame.shape[1], frame.shape[0])
+                full_packet = header + data
+                if self.video_secure_mode:
+                    self.video_socket.send(full_packet)
+                else:
+                    self.video_socket.sendall(full_packet)
+            except Exception as e:
+                logger.error(f"Ошибка отправки видео: {e}")
+                self.video_socket_set = False
 
-    def receive_video_frame(self):
-        """Прием кадра видео"""
-        try:
-            if not self.video_socket or self.video_socket.fileno() == -1 or not self.is_socket_connected(self.video_socket):
-                return None
-            # Чтение заголовка
-            header = self.video_socket.recv(12)  # 3 int по 4 байта
-            if len(header) < 12:
-                return None
-            
-            data_size, width, height = struct.unpack('III', header)
-            
-            # Чтение данных
-            data = b''
-            while len(data) < data_size:
-                chunk = self.video_socket.recv(min(4096, data_size - len(data)))
+    def receive_video_loop(self):
+        """Цикл приёма видео-пакетов с блокировкой для защиты сокета"""
+        buffer = b''
+        while self.video_socket_set and self.video_socket:
+            try:
+                # === Блокировка только на момент чтения из сокета ===
+                with self.video_socket_lock:
+                    if not self.video_socket:      # сокет мог быть изменён
+                        break
+                    if self.video_secure_mode:
+                        # SecureChannel.recv() сам читает полный пакет с учётом длины
+                        packet = self.video_socket.recv()
+                        # Если пришёл пустой пакет – соединение закрыто
+                        if not packet:
+                            self.video_socket_set = False
+                            break
+                        # SecureChannel возвращает уже расшифрованные данные (без заголовка SecureChannel)
+                        # Переменная packet содержит: [data_size(4)][width(4)][height(4)][jpeg_data]
+                        if len(packet) < 12:
+                            continue
+                        data_size, width, height = struct.unpack('III', packet[:12])
+                        if len(packet) >= 12 + data_size:
+                            jpeg_data = packet[12:12+data_size]
+                            nparr = np.frombuffer(jpeg_data, np.uint8)
+                            frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            if frame is not None:
+                                try:
+                                    if self.remote_frame_queue.full():
+                                        self.remote_frame_queue.get_nowait()
+                                    self.remote_frame_queue.put_nowait(frame)
+                                except queue.Full:
+                                    pass
+                        continue
+                    else:
+                        # Обычный сокет: читаем чанк
+                        chunk = self.video_socket.recv(4096)
+                # === Конец защищённого блока ===
+
                 if not chunk:
+                    # Соединение закрыто удалённой стороной
+                    with self.video_socket_lock:
+                        self.video_socket_set = False
                     break
-                data += chunk
-            
-            if len(data) == data_size:
-                # Декодируем JPEG
-                nparr = np.frombuffer(data, np.uint8)
-                frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                
-                if frame is not None:
-                    # Конвертируем RGB в BGR для OpenCV
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-                    return frame
-            
-            return None
-        except OSError as e:
-            if e.errno == 107:  # ENOTCONN
-                logger.warning("Сокет не подключён при приёме видео")
-            elif e.errno == 9:
-                logger.warning("Сокет закрыт при приёме кадра")
-            else:
-                logger.error(f"Ошибка приёма видео: {e}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Ошибка приема видео: {e}")
-            return None
-    
+
+                buffer += chunk
+
+                # Обработка буфера: извлекаем полные пакеты
+                while len(buffer) >= 12:
+                    data_size, width, height = struct.unpack('III', buffer[:12])
+                    if data_size <= 0 or data_size > 10 * 1024 * 1024:  # лимит 10 МБ
+                        # Неверный заголовок – сбросим байт и попробуем синхронизироваться заново
+                        buffer = buffer[1:]
+                        continue
+                    if len(buffer) >= 12 + data_size:
+                        jpeg_data = buffer[12:12+data_size]
+                        nparr = np.frombuffer(jpeg_data, np.uint8)
+                        frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                        if frame is not None:
+                            try:
+                                if self.remote_frame_queue.full():
+                                    self.remote_frame_queue.get_nowait()
+                                self.remote_frame_queue.put_nowait(frame)
+                            except queue.Full:
+                                pass
+                        buffer = buffer[12+data_size:]
+                    else:
+                        break
+
+            except socket.timeout:
+                # Таймаут – нормально, продолжаем цикл
+                continue
+            except (ConnectionError, BrokenPipeError, OSError, AttributeError) as e:
+                logger.warning(f"Ошибка в receive_video_loop: {e}")
+                with self.video_socket_lock:
+                    self.video_socket_set = False
+                break
+            except Exception as e:
+                logger.error(f"Неожиданная ошибка в receive_video_loop: {e}", exc_info=True)
+                with self.video_socket_lock:
+                    self.video_socket_set = False
+                break
+
+        logger.info("receive_video_loop завершён")
+
     def receive_video_loop(self):
         """Цикл приёма видео-пакетов (работает с SecureChannel и обычным сокетом)."""
         buffer = b''
@@ -968,33 +1010,29 @@ class VideoCallWindow(QWidget):
     def set_video_socket(self, socket):
         """Установка сокета для видео и немедленный запуск приёма"""
         logger.info(f"📥 set_video_socket вызван, тип сокета: {type(socket)}")
-        # Останавливаем предыдущий поток приёма, если он существует
-        if hasattr(self, 'receive_thread') and self.receive_thread and self.receive_thread.is_alive():
-            self.video_socket_set = False
-            self.receive_thread.join(timeout=1.0)
-            self.receive_thread = None
+        with self.video_socket_lock:
+            # Останавливаем предыдущий поток приёма, если он существует
+            if hasattr(self, 'receive_thread') and self.receive_thread and self.receive_thread.is_alive():
+                self.video_socket_set = False
+                self.receive_thread.join(timeout=1.0)
+                self.receive_thread = None
 
-        self.video_socket = socket
-        if hasattr(socket, 'settimeout'):
-            socket.settimeout(0.5)
-        if hasattr(socket, 'fileno'):
-            self.video_secure_mode = False
-        else:
-            self.video_secure_mode = True
-        self.video_socket_set = True
+            self.video_socket = socket
+            if hasattr(socket, 'settimeout'):
+                socket.settimeout(0.5)
+            if hasattr(socket, 'fileno'):
+                self.video_secure_mode = False
+            else:
+                self.video_secure_mode = True
+            self.video_socket_set = True
 
-        # Создаём и запускаем новый поток приёма видео
-        self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
-        self.receive_thread.start()
+            # Создаём и запускаем новый поток приёма видео
+            self.receive_thread = threading.Thread(target=self.receive_video_loop, daemon=True)
+            self.receive_thread.start()
 
-        self.status_label.setText("🟢 Видео-соединение установлено")
+            self.status_label.setText("🟢 Видео-соединение установлено")
         logger.info("Видео-приём запущен")
         return True
-
-    
-    def check_video_socket(self):
-        pass
-
 
     def set_audio_socket(self, socket):
         """Передать аудио-сокет от P2P сети и запустить аудио"""
@@ -1064,12 +1102,16 @@ class VideoCallWindow(QWidget):
         self._is_closing = True
         self.stop_video_capture()
         self.audio_core.stop()
-        self.video_socket_set = False
-        if self.video_socket:
-            try:
-                self.video_socket.close()
-            except:
-                pass
+
+        with self.video_socket_lock:
+            self.video_socket_set = False
+            if self.video_socket:
+                try:
+                    self.video_socket.close()
+                except:
+                    pass
+                self.video_socket = None
+                
         self.call_ended.emit(self.call_id)
         self.close()
     
@@ -1137,7 +1179,7 @@ class AudioCallCore:
         if self._streams_started:
             logger.warning("AudioCallCore: потоки уже запущены, игнорируем повторный запуск")
             return
-        self._streams_started = True
+        
         if not self.audio_socket:
             logger.warning("AudioCallCore: нет сокета для запуска потоков")
             return
@@ -1167,6 +1209,7 @@ class AudioCallCore:
             self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
             self._send_thread.start()
             self._recv_thread.start()
+            self._streams_started = True
 
             logger.info(f"AudioCallCore: аудио-потоки запущены для звонка {self.call_id}")
         except Exception as e:
