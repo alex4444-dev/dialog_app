@@ -53,6 +53,7 @@ class VideoCaptureThread(QThread):
             
             if not self.camera.isOpened():
                 logger.error(f"Не удалось открыть камеру {self.camera_index}")
+                self.running = False
                 return
             
             # Настраиваем параметры камеры
@@ -94,6 +95,7 @@ class VideoCaptureThread(QThread):
                     
         except Exception as e:
             logger.error(f"Критическая ошибка в потоке захвата видео: {e}")
+            self.running = False
         finally:
             self.stop_capture()
             
@@ -176,9 +178,14 @@ class VideoProcessor:
         self.processed_queue = queue.Queue(maxsize=10)
         self.running = False
         self.thread = None
+        self.target_width = 320   # значения по умолчанию
+        self.target_height = 240
         
-    def start(self):
+    def start(self, target_width=320, target_height=240):
         """Запуск обработки видео"""
+        self.stop() # Останавливаем предыдущий поток
+        self.target_width = target_width
+        self.target_height = target_height
         self.running = True
         self.thread = threading.Thread(target=self._process_loop, daemon=True)
         self.thread.start()
@@ -240,8 +247,8 @@ class VideoProcessor:
         """Обработка одного кадра"""
         try:
             # Изменение размера если нужно
-            target_width = 320
-            target_height = 240
+            target_width = self.target_width
+            target_height = self.target_height
             
             h, w = frame.shape[:2]
             if w != target_width or h != target_height:
@@ -387,8 +394,8 @@ class VideoCallWindow(QWidget):
     def init_ui(self):
         """Инициализация интерфейса"""
         self.setWindowTitle(f"📹 Видеозвонок с {self.username}")
-        self.setMinimumSize(800, 600)
-        self.setMaximumSize(1240, 650)
+        self.setMinimumSize(760, 600)
+        self.setMaximumSize(1000, 650)
         self.resize(1024, 768)
 
         self.setAttribute(Qt.WA_TranslucentBackground, False)
@@ -434,7 +441,7 @@ class VideoCallWindow(QWidget):
         # Локальное видео (маленькое)
         self.local_video_widget = VideoWidget()
         self.local_video_widget.setMinimumSize(240, 180)
-        self.local_video_widget.setMaximumSize(480, 360)
+        self.local_video_widget.setMaximumSize(360, 240)
         self.local_video_widget.setStyleSheet("""
             QLabel {
                 border: 2px solid #27ae60;
@@ -446,7 +453,8 @@ class VideoCallWindow(QWidget):
         
         # Удаленное видео (большое)
         self.remote_video_widget = VideoWidget()
-        self.remote_video_widget.setMinimumSize(640, 480)
+        self.remote_video_widget.setMinimumSize(650, 420)
+        self.remote_video_widget.setMaximumSize(900, 500)
         self.remote_video_widget.setText(f"Ожидание видео от {self.username}")
         
         video_layout.addWidget(self.remote_video_widget, 3)
@@ -648,7 +656,7 @@ class VideoCallWindow(QWidget):
             self.capture_thread.frame_ready.connect(self.handle_frame_ready)
             
             # Запускаем обработчик видео
-            self.video_processor.start()
+            self.video_processor.start(self.resolution[0], self.resolution[1])
             
             logger.info("Видео захват настроен")
             self.status_label.setText("🟢 Камера готова")
@@ -686,7 +694,7 @@ class VideoCallWindow(QWidget):
                         self.local_frame = processed
                     else:
                         # Если обработчик не успел, используем исходный кадр
-                        self.local_frame = frame
+                        self.local_frame = cv2.resize(frame, self.resolution)
                 else:
                     # Простая обработка без улучшения цветов
                     h, w = frame.shape[:2]
@@ -964,6 +972,7 @@ class VideoCallWindow(QWidget):
         if hasattr(self, 'receive_thread') and self.receive_thread and self.receive_thread.is_alive():
             self.video_socket_set = False
             self.receive_thread.join(timeout=1.0)
+            self.receive_thread = None
 
         self.video_socket = socket
         if hasattr(socket, 'settimeout'):
@@ -1047,10 +1056,12 @@ class VideoCallWindow(QWidget):
     def reject_call(self):
         """Отклонить видеозвонок"""
         self.call_rejected.emit(self.call_id)
+        self.end_call()
         self.close()
     
     def end_call(self):
         """Завершить видеозвонок"""
+        self._is_closing = True
         self.stop_video_capture()
         self.audio_core.stop()
         self.video_socket_set = False
