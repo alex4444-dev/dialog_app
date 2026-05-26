@@ -2182,7 +2182,29 @@ class P2PNetworkClient(QObject):
                 logger.error(f"❌ Пользователь {to_username} не найден. Доступны: {available}")
                 return None
 
-            # 5. Отправить запрос
+            # 5. Получить локальный IP, видимый этому пиру (через существующий сокет)
+            sock = target_peer['socket']
+            if hasattr(sock, 'sock'):          # SecureChannel
+                sock = sock.sock
+            try:
+                local_ip = sock.getsockname()[0]
+            except Exception:
+                local_ip = self._get_local_ip()   # fallback
+                logger.warning(f"Не удалось получить IP из сокета, используем {local_ip}")
+
+            # 6. Сформировать media_info с правильным IP
+            media_info = {
+                'media_server': local_ip,
+                'media_port': local_port,
+                'call_id': call_id
+            }
+            if video_port:
+                media_info['video_port'] = video_port
+                logger.info(f"📹 Отправляем media_info: {media_info}")
+            else:
+                logger.info(f"🔊 Отправляем media_info: {media_info}")
+
+            # 7. Отправить запрос
             message = {
                 'type': 'call_request',
                 'call_id': call_id,
