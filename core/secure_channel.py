@@ -4,7 +4,7 @@ import socket
 import struct
 import threading
 import logging
-from crypto import CryptoManager
+from core.crypto import CryptoManager
 
 logger = logging.getLogger('secure_channel')
 

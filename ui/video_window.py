@@ -15,12 +15,22 @@ import numpy as np
 import logging
 import socket
 import select
-from secure_channel import SecureChannel
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
                              QPushButton, QGroupBox, QSizePolicy, QDialog,
                              QFormLayout, QComboBox, QDialogButtonBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSize, QThread, pyqtSignal as Signal
 from PyQt5.QtGui import QImage, QPixmap, QPainter, QPalette, QColor, QRadialGradient
+
+# Добавляем путь к текущей директории для импорта модулей
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+try:
+    from core.secure_channel import SecureChannel
+except ImportError as e:
+    print(f"Ошибка импорта: {e}")
+    print("Убедитесь, что все файлы находятся в правильной структуре папок")
+    sys.exit(1)
 
 
 MAX_AUDIO_PACKET_SIZE = 65536  # до 4096 сэмплов float32

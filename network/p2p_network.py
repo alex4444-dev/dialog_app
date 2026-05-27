@@ -1,4 +1,5 @@
 import os
+import sys
 import asyncio
 import socket
 import threading
@@ -13,10 +14,20 @@ import logging.handlers
 import socket
 import random
 import json
-from crypto import CryptoManager
-from secure_channel import SecureChannel
 from typing import Dict, List, Optional, Callable
 from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
+
+# Добавляем путь к текущей директории для импорта модулей
+root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if root_dir not in sys.path:
+    sys.path.insert(0, root_dir)
+try:
+    from core.crypto import CryptoManager
+    from core.secure_channel import SecureChannel
+except ImportError as e:
+    print(f"Ошибка импорта: {e}")
+    print("Убедитесь, что все файлы находятся в правильной структуре папок")
+    sys.exit(1)
 
 
 import logging
