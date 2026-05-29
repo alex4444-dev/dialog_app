@@ -16,6 +16,10 @@ import random
 import json
 from typing import Dict, List, Optional, Callable
 from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+
+
+
 
 # Добавляем путь к текущей директории для импорта модулей
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -115,6 +119,10 @@ class P2PNetworkClient(QObject):
         self.active_audio_calls = {}  # call_id -> peer_id
         self.media_ports = set()  # Для отслеживания используемых медиа-портов
         self.peer_crypto = {}  # peer_id -> CryptoManager
+        self.webrtc_connections = {}  # peer_id -> RTCPeerConnection
+        self.webrtc_channels = {}      # peer_id -> RTCDataChannel
+        self.webrtc_loop = None        # asyncio event loop в отдельном потоке
+        self.webrtc_thread = None
         
         # Bootstrap узлы: если переданы, используем их, иначе пустой список
         if bootstrap_nodes is None:
@@ -267,6 +275,11 @@ class P2PNetworkClient(QObject):
             # Запускаем обслуживание сети
             self.maintenance_thread = threading.Thread(target=self._network_maintenance, daemon=True)
             self.maintenance_thread.start()
+
+            # Инициализируем asyncio event loop в отдельном потоке
+            self.webrtc_loop = None
+            self.webrtc_thread = threading.Thread(target=self._start_webrtc_loop, daemon=True)
+            self.webrtc_thread.start()
         
             logger.info(f"🚀 P2P клиент запущен на порту {self.listen_port}")
             self.connection_status_changed.emit("✅ P2P сеть запущена")
@@ -311,6 +324,129 @@ class P2PNetworkClient(QObject):
         
         logger.info("P2P клиент остановлен")
 
+    def _start_webrtc_loop(self):
+        """Запускает asyncio event loop для WebRTC в отдельном потоке"""
+        self.webrtc_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.webrtc_loop)
+        self.webrtc_loop.run_forever()
+
+    def _run_coro(self, coro):
+        """Запустить корутину в webrtc_loop и дождаться результата (блокирующий вызов из синхронного кода)"""
+        if not self.webrtc_loop:
+            raise RuntimeError("WebRTC loop not running")
+        future = asyncio.run_coroutine_threadsafe(coro, self.webrtc_loop)
+        return future.result(timeout=10)
+
+    async def _create_webrtc_offer(self, peer_id: str, peer_info: dict):
+        """Создать offer для установки WebRTC-соединения с пиром"""
+        from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+        
+        # Конфигурация ICE из config.yaml
+        ice_servers = []
+        for srv in self.config.get('media', {}).get('ice_servers', []):
+            ice_servers.append(RTCIceServer(urls=srv['urls']))
+        
+        config = RTCConfiguration(iceServers=ice_servers)
+        pc = RTCPeerConnection(configuration=config)
+        
+        # Создаём DataChannel для обмена сообщениями (поверх WebRTC)
+        channel = pc.createDataChannel("dialog")
+        
+        @channel.on("open")
+        def on_open():
+            logger.info(f"✅ WebRTC DataChannel открыт с {peer_id}")
+            # После открытия канала можно отправить приветствие или сразу использовать
+            pass
+    
+        @channel.on("message")
+        def on_message(message):
+            # message – это bytes (или str). Здесь уже будет ваше зашифрованное сообщение.
+            # Обрабатываем так же, как в _process_received_data
+            try:
+                if isinstance(message, bytes):
+                    data = json.loads(message.decode('utf-8'))
+                else:
+                    data = json.loads(message)
+                # Имитируем получение от этого же peer_id
+                self._process_received_data(data, peer_id)
+            except Exception as e:
+                logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+        
+        # Генерируем offer
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+        
+        # Сохраняем pc и channel
+        self.webrtc_connections[peer_id] = pc
+        self.webrtc_channels[peer_id] = channel
+        
+        return pc.localDescription
+
+    async def _handle_webrtc_answer(self, peer_id: str, answer_sdp: str, answer_type: str):
+        """Установить answer от пира"""
+        pc = self.webrtc_connections.get(peer_id)
+        if not pc:
+            logger.error(f"Нет WebRTC соединения для {peer_id}")
+            return
+        answer = RTCSessionDescription(sdp=answer_sdp, type=answer_type)
+        await pc.setRemoteDescription(answer)
+    
+    def _initiate_webrtc_connection(self, peer_id: str, peer_info: dict):
+        """Инициирует WebRTC соединение с пиром (отправляет offer)"""
+        from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+
+        # Загружаем STUN/TURN серверы из config (или ставим по умолчанию)
+        ice_servers = []
+        # Если у вас есть config с секцией media.ice_servers, используйте её
+        # Для примера – публичные STUN
+        ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
+        # Можно добавить TURN позже
+
+        config = RTCConfiguration(iceServers=ice_servers)
+        pc = RTCPeerConnection(configuration=config)
+
+        # Создаём DataChannel для обмена сообщениями (он будет открыт автоматически)
+        channel = pc.createDataChannel("dialog")
+
+        @channel.on("open")
+        def on_open():
+            logger.info(f"✅ WebRTC DataChannel открыт с {peer_id}")
+
+        @channel.on("message")
+        def on_message(message):
+            # Обработка входящего сообщения (уже расшифровано DTLS, но ваше E2E ещё поверх)
+            try:
+                if isinstance(message, bytes):
+                    data = json.loads(message.decode('utf-8'))
+                else:
+                    data = json.loads(message)
+                self._process_received_data(data, peer_id)
+            except Exception as e:
+                logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+
+        # Асинхронно создаём offer и устанавливаем local description
+        async def create_offer():
+            offer = await pc.createOffer()
+            await pc.setLocalDescription(offer)
+            return pc.localDescription
+
+        offer_desc = self._run_coro(create_offer())
+
+        # Сохраняем объекты
+        self.webrtc_connections[peer_id] = pc
+        self.webrtc_channels[peer_id] = channel   # канал пока не открыт, но объект есть
+
+        # Отправляем offer через существующий TCP-канал
+        signal_msg = {
+            'type': 'webrtc_offer',
+            'sdp': offer_desc.sdp,
+            'sdp_type': offer_desc.type,   # обычно "offer"
+            'peer_id': peer_id
+        }
+        if self._send_to_peer(peer_info, signal_msg):
+            logger.info(f"📤 WebRTC offer отправлен {peer_id}")
+        else:
+            logger.error(f"Не удалось отправить offer {peer_id}")
 
     def simple_connect(self, target_host, target_port):
         """Простое прямое подключение к другому компьютеру"""
@@ -413,6 +549,63 @@ class P2PNetworkClient(QObject):
         except Exception as e:
             logger.error(f"Ошибка отправки информации о себе: {e}")
 
+    def _handle_webrtc_offer(self, data: dict, peer_id: str):
+        """Приём offer от пира, создание answer"""
+    
+        offer_sdp = data['sdp']
+        offer_type = data['sdp_type']   # "offer"
+        offer = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
+
+        ice_servers = [RTCIceServer(urls=["stun:stun.l.google.com:19302"])]
+        config = RTCConfiguration(iceServers=ice_servers)
+        pc = RTCPeerConnection(configuration=config)
+
+        # Обработчик входящего DataChannel (создаётся автоматически, когда remote создаст канал)
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            logger.info(f"📡 Входящий DataChannel от {peer_id}, label={channel.label}")
+            self.webrtc_channels[peer_id] = channel
+
+            @channel.on("message")
+            def on_message(message):
+                try:
+                    if isinstance(message, bytes):
+                        data = json.loads(message.decode())
+                    else:
+                        data = json.loads(message)
+                    self._process_received_data(data, peer_id)
+                except Exception as e:
+                    logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+
+        # Устанавливаем remote description (offer)
+        async def set_remote():
+            await pc.setRemoteDescription(offer)
+            return await pc.createAnswer()
+
+        answer_desc = self._run_coro(set_remote())
+
+        # Устанавливаем local description (answer)
+        async def set_local():
+            await pc.setLocalDescription(answer_desc)
+
+        self._run_coro(set_local())
+
+        # Сохраняем peer connection
+        self.webrtc_connections[peer_id] = pc
+
+        # Отправляем answer обратно через существующий TCP-канал
+        peer_info = self.connected_peers.get(peer_id)
+        if peer_info:
+            answer_msg = {
+                'type': 'webrtc_answer',
+                'sdp': pc.localDescription.sdp,
+                'sdp_type': pc.localDescription.type,   # "answer"
+                'peer_id': peer_id
+            }
+            self._send_to_peer(peer_info, answer_msg)
+            logger.info(f"📤 WebRTC answer отправлен {peer_id}")
+        else:
+            logger.error(f"Пир {peer_id} не найден для отправки answer")
     
 
     def get_peers_from_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
@@ -1518,7 +1711,11 @@ class P2PNetworkClient(QObject):
             self._handle_peer_discovery(data)
         elif message_type == 'media_info':
             self._handle_media_info(data, peer_id)
-        elif message_type == 'media_ack':
+        elif message_type == 'webrtc_offer':
+            self._handle_webrtc_offer(data, peer_id)
+        elif message_type == 'webrtc_answer':
+            self._handle_webrtc_answer(data, peer_id)
+        elif message_type == 'media_ack':            
             logger.info(f"✅ Получено подтверждение медиа-соединения для звонка {data.get('call_id')}")
         else:
             logger.warning(f"Неизвестный тип сообщения: {message_type}")
@@ -1539,6 +1736,40 @@ class P2PNetworkClient(QObject):
                 logger.warning(f"⚠️ Пользователь {to_username} не найден в подключенных пирах")
                 return False
 
+            message_data = {
+                    'type': 'message',
+                    'from': self.username,
+                    'to': to_username,
+                    'message': message,
+                    'message_id': message_id,
+                    'timestamp': time.time(),
+                    'requires_ack': True
+                }
+
+            # Внутри send_message, после поиска кандидатов
+            # Сначала пробуем WebRTC
+            for peer_id, channel in self.webrtc_channels.items():
+                if self.connected_peers.get(peer_id, {}).get('username') == to_username:
+                    try:
+                        # 1. Сериализуем и отправляем
+                        channel.send(json.dumps(message_data).encode())
+                        
+                        # 2. Добавляем в pending_messages для отслеживания подтверждения
+                        with self.message_retry_lock:
+                            self.pending_messages[message_id] = {
+                                'message_data': message_data,
+                                'target_peer': self.connected_peers[peer_id],  # сохраняем peer_info для fallback
+                                'timestamp': time.time(),
+                                'last_sent': time.time(),
+                                'attempts': 1,        # первая попытка
+                                'webrtc_channel': channel  # пометка, что отправлено через WebRTC (опционально)
+                            }
+                        logger.info(f"✅ Сообщение {message_id} отправлено через WebRTC пользователю {to_username}")    
+                        return True
+                    except Exception as e:
+                        logger.warning(f"WebRTC отправка не удалась: {e}")
+            
+            
             # Пробуем отправить, по очереди проверяя сокеты
             for peer_id, target_peer in candidates:
                 # Проверка живости сокета
@@ -1551,24 +1782,16 @@ class P2PNetworkClient(QObject):
                         self._handle_peer_disconnection(peer_id)
                         continue
 
-                message_data = {
-                    'type': 'message',
-                    'from': self.username,
-                    'to': to_username,
-                    'message': message,
-                    'message_id': message_id,
-                    'timestamp': time.time(),
-                    'requires_ack': True
-                }
-
-                with self.message_retry_lock:
-                    self.pending_messages[message_id] = {
-                        'message_data': message_data,
-                        'target_peer': target_peer,
-                        'timestamp': time.time(),
-                        'last_sent': time.time(),
-                        'attempts': 0
-                    }
+                # Добавляем в pending (если ещё не добавлено из WebRTC-блока)
+                if message_id not in self.pending_messages:         
+                    with self.message_retry_lock:
+                        self.pending_messages[message_id] = {
+                            'message_data': message_data,
+                            'target_peer': target_peer,
+                            'timestamp': time.time(),
+                            'last_sent': time.time(),
+                            'attempts': 0
+                        }
 
                 success = self._send_message_direct(target_peer, message_data, message_id)
                 if success:
@@ -1780,10 +2003,13 @@ class P2PNetworkClient(QObject):
             if username:
                 self.connected_peers[peer_id]['username'] = username
                 self.connected_peers[peer_id]['last_seen'] = time.time()
-                logger.info(f"👤 Пользователь {username} в сети (пир {peer_id})")
+                logger.info(f"👤 Пользователь {username} в сети (пир {peer_id})")        
+                # Через пару секунд пробуем установить WebRTC (чтобы не мешать основному обмену)
+                threading.Timer(2.0, self._initiate_webrtc_connection, args=(peer_id, self.connected_peers[peer_id])).start()
                 online_users = self.get_online_users()
                 self.user_list_updated.emit(online_users)
                 logger.info(f"📊 Обновлен список пользователей: {len(online_users)} пользователей онлайн")
+            
             else:
                 self.connected_peers[peer_id]['last_seen'] = time.time()
                 logger.debug(f"Пир {peer_id} без имени, last_seen обновлён")

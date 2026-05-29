@@ -1,8 +1,10 @@
 import logging
 import os
-from PyQt5.QtCore import QSettings
-from playsound import playsound
 import threading
+import wave
+import numpy as np
+import sounddevice as sd
+from PyQt5.QtCore import QSettings
 
 logger = logging.getLogger('dialog_gui')
 
@@ -17,6 +19,19 @@ class SoundManager:
             'file_received': self.settings.value('sound_file_received', 'sounds/file_received.wav', type=str)
         }
 
+    def _play_wav(self, file_path: str):
+        """Воспроизвести WAV файл через sounddevice"""
+        try:
+            with wave.open(file_path, 'rb') as wf:
+                data = wf.readframes(wf.getnframes())
+                samples = np.frombuffer(data, dtype=np.int16)
+                if wf.getnchannels() == 2:
+                    samples = samples.reshape(-1, 2)
+                sd.play(samples, samplerate=wf.getframerate())
+                sd.wait()
+        except Exception as e:
+            logger.error(f"Ошибка воспроизведения {file_path}: {e}")
+
     def play(self, sound_name: str):
         if not self.enabled:
             return
@@ -24,12 +39,7 @@ class SoundManager:
         if not sound_file or not os.path.exists(sound_file):
             logger.debug(f"Звуковой файл не найден: {sound_file}")
             return
-        def _play():
-            try:
-                playsound(sound_file)
-            except Exception as e:
-                logger.error(f"Ошибка воспроизведения звука {sound_name}: {e}")
-        threading.Thread(target=_play, daemon=True).start()
+        threading.Thread(target=self._play_wav, args=(sound_file,), daemon=True).start()
 
     def set_enabled(self, enabled: bool):
         self.enabled = enabled
