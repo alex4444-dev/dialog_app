@@ -39,7 +39,6 @@ class CallWindow(QWidget):
         self.output_device = output_device
         self._recv_buffer = b''   # буфер для приёма данных
 
-
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
 
         self.is_active = False
@@ -63,7 +62,6 @@ class CallWindow(QWidget):
         self.sent_packets = 0
         self.received_packets = 0
         
-
         # Сокет для звонка
         self.call_socket = None
         self.socket_set = False
@@ -93,8 +91,7 @@ class CallWindow(QWidget):
         self.activateWindow()  
 
         logger.info(f"🔊 CallWindow создано успешно")
-        
-    
+            
     def init_ui(self):
         """Инициализация интерфейса окна звонка"""
         self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
@@ -337,7 +334,6 @@ class CallWindow(QWidget):
             if hasattr(self, 'status_label'):
                 self.mute_button.setText("🔊 Микрофон вкл")
             
-
     def set_call_socket(self, call_socket):
         try:
             if call_socket is None:
@@ -611,7 +607,6 @@ class CallWindow(QWidget):
             self._do_start_call()
         except Exception as e:
             logger.error(f"❌ Ошибка запуска звонка: {e}")
-
 
     def _do_start_call(self):
         """Внутренний запуск звонка после того, как сокет установлен"""
@@ -1021,8 +1016,6 @@ class CallWindow(QWidget):
         self.audio_receiver_thread = threading.Thread(target=self._audio_receiver_loop, daemon=True)
         self.audio_receiver_thread.start()
             
-        
-
     def stop_audio_streams(self):
         """Остановка аудио-потоков"""
         try:

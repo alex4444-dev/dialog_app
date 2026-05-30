@@ -34,6 +34,7 @@ class GeneralSettingsPage(QWidget):
         super().__init__(parent)
         self.settings = QSettings('DialogApp', 'P2PClient')
         self.current_nickname = current_nickname or ""
+        self.main_window = None
         self.init_ui()
 
     def init_ui(self):
@@ -149,6 +150,17 @@ class GeneralSettingsPage(QWidget):
         sound_layout.addLayout(row_file_snd)
 
         layout.addWidget(sound_group)
+
+        blacklist_group = QGroupBox("🚫 Чёрный список")
+        blacklist_layout = QVBoxLayout(blacklist_group)
+
+        # Кнопка управления
+        self.manage_blacklist_btn = QPushButton("📋 Управление чёрным списком")
+        self.manage_blacklist_btn.clicked.connect(self.open_blacklist_dialog)
+        blacklist_layout.addWidget(self.manage_blacklist_btn)
+
+        blacklist_group.setLayout(blacklist_layout)
+        layout.addWidget(blacklist_group)
 
 
     # ========== Методы для псевдонима ==========
@@ -291,6 +303,61 @@ class GeneralSettingsPage(QWidget):
         if folder:
             self.download_path.setText(folder)
             self.settings.setValue('download_folder', folder)
+
+    def open_blacklist_dialog(self):
+        """Открывает диалог со списком заблокированных пользователей"""
+        if not self.main_window:
+            # Пытаемся найти главное окно
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'main_window') and parent.main_window:
+                    self.main_window = parent.main_window
+                    break
+                parent = parent.parent()
+            if not self.main_window:
+                QMessageBox.warning(self, "Ошибка", "Не удалось получить главное окно приложения")
+                return
+
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QMessageBox
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Чёрный список")
+        dialog.setMinimumWidth(350)
+        layout = QVBoxLayout(dialog)
+
+        list_widget = QListWidget()
+        # Загружаем список заблокированных
+        if self.main_window.p2p_client and hasattr(self.main_window.p2p_client, 'db'):
+            blacklist = self.main_window.p2p_client.db.get_blacklist()
+            for item in blacklist:
+                list_widget.addItem(item['username'])
+        else:
+            list_widget.addItem("Невозможно загрузить список")
+            list_widget.setEnabled(False)
+
+        layout.addWidget(list_widget)
+
+        btn_unblock = QPushButton("🔓 Разблокировать выбранного")
+        def unblock():
+            current = list_widget.currentItem()
+            if current:
+                username = current.text()
+                reply = QMessageBox.question(dialog, "Подтверждение",
+                                            f"Разблокировать пользователя {username}?",
+                                            QMessageBox.Yes | QMessageBox.No)
+                if reply == QMessageBox.Yes:
+                    self.main_window.unblock_user(username)
+                    # Обновляем список
+                    list_widget.takeItem(list_widget.row(current))
+            else:
+                QMessageBox.information(dialog, "Внимание", "Выберите пользователя")
+        btn_unblock.clicked.connect(unblock)
+        layout.addWidget(btn_unblock)
+
+        dialog.exec_()
+
+    def set_main_window(self, main_window):
+        self.main_window = main_window
 
     def get_settings(self):
         """Возвращает словарь с настройками из этой вкладки"""
@@ -1446,7 +1513,10 @@ class SettingsDialog(QDialog):
 
         # Создаём страницы
         self.general_page = GeneralSettingsPage(current_nickname=parent.username if parent else "")
+        if parent:
+            self.general_page.set_main_window(parent)
         self.general_page.nickname_changed.connect(self.on_nickname_changed)
+        
         self.audio_page = AudioSettingsPage(
             current_input=self.settings_data['input_device'],
             current_output=self.settings_data['output_device']

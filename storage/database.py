@@ -65,6 +65,14 @@ class ClientDatabase:
                 )
             ''')
             
+            # Таблица черного списка
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS blacklist (
+                    user_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    blocked_username TEXT UNIQUE NOT NULL,
+                    blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
             conn.commit()
         finally:
             conn.close()
@@ -217,3 +225,35 @@ class ClientDatabase:
             return computed_hash == hash_value
         except:
             return False
+
+    def add_to_blacklist(self, username: str):
+        conn = self._get_connection()
+        try:
+            conn.execute("INSERT OR IGNORE INTO blacklist (blocked_username) VALUES (?)", (username,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def remove_from_blacklist(self, username: str):
+        conn = self._get_connection()
+        try:
+            conn.execute("DELETE FROM blacklist WHERE blocked_username = ?", (username,))
+            conn.commit()
+        finally:
+            conn.close()
+
+    def is_blocked(self, username: str) -> bool:
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT 1 FROM blacklist WHERE blocked_username = ?", (username,))
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_blacklist(self) -> list:
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute("SELECT blocked_username, blocked_at FROM blacklist ORDER BY blocked_at")
+            return [{"username": row[0], "blocked_at": row[1]} for row in cursor.fetchall()]
+        finally:
+            conn.close()

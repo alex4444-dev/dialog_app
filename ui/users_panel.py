@@ -10,14 +10,15 @@ class UsersPanel(QWidget):
     refresh_requested = pyqtSignal()
     call_requested = pyqtSignal(str, str)  # username, call_type
     peer_connect_requested = pyqtSignal(str, int)  # host, port
-    peer_disconnect_requested = pyqtSignal(str, int)  # host, port
+    peer_disconnect_requested = pyqtSignal(str, int)  # host, port    
+    block_user = pyqtSignal(str)      # username
+    unblock_user = pyqtSignal(str)    # username
     
     def __init__(self):
         super().__init__()
         self.peers_data = {}  # {peer_id: {'username': str, 'host': str, 'port': int, 'status': str}}
         self.init_ui()
-        
-        
+               
     def init_ui(self):
         layout = QVBoxLayout()
         layout.setContentsMargins(8, 8, 8, 8)
@@ -117,6 +118,16 @@ class UsersPanel(QWidget):
             video_call_action = QAction("Видео звонок", self)
             video_call_action.triggered.connect(lambda: self.call_requested.emit(username, 'video'))
             call_menu.addAction(video_call_action)
+
+            context_menu.addSeparator()
+            
+            block_action = QAction("🚫 Заблокировать", self)
+            block_action.triggered.connect(lambda: self.block_user.emit(username))
+            context_menu.addAction(block_action)
+
+            unblock_action = QAction("🔓 Разблокировать", self)
+            unblock_action.triggered.connect(lambda: self.unblock_user.emit(username))
+            context_menu.addAction(unblock_action)
             
         else:
             connect_action = QAction("🔗 Подключиться", self)

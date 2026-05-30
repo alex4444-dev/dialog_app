@@ -2,7 +2,6 @@
 """
 Утилиты для видеозвонков
 """
-
 import cv2
 import numpy as np
 import logging
@@ -13,8 +12,7 @@ from queue import Queue
 logger = logging.getLogger('dialog_video_utils')
 
 class VideoCompressor:
-    """Компрессор видео"""
-    
+    """Компрессор видео"""   
     def __init__(self, quality=85):
         self.quality = quality
         
@@ -53,8 +51,7 @@ class VideoCompressor:
             return None
 
 class VideoBuffer:
-    """Буфер для видео кадров"""
-    
+    """Буфер для видео кадров"""    
     def __init__(self, max_size=30):
         self.buffer = Queue(maxsize=max_size)
         self.lock = threading.Lock()

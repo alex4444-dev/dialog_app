@@ -108,8 +108,6 @@ class P2PMainWindow(QMainWindow):
         self.sig_call_status.connect(self.on_call_status)
         self.chat_windows = {}
 
-        
-
         self.init_ui()      
     
     def init_ui(self):
@@ -137,6 +135,9 @@ class P2PMainWindow(QMainWindow):
         self.users_panel.peer_connect_requested.connect(self.connect_to_peer)
         self.users_panel.peer_disconnect_requested.connect(self.disconnect_from_peer)
         
+        self.users_panel.block_user.connect(self.block_user)
+        self.users_panel.unblock_user.connect(self.unblock_user)
+        
         self.users_panel.setFixedWidth(280)
         main_layout.addWidget(self.users_panel)
         
@@ -159,14 +160,13 @@ class P2PMainWindow(QMainWindow):
         
         # Создаем системный трей
         self.setup_system_tray()
-
         
         self.setup_hotkeys()
         
         # Запускаем работу ком. платформы ДИАЛОГ с задержкой
         QTimer.singleShot(1000, self.start_p2p_messaging)
         
-        logger.info("P2P интерфейс инициализирован")
+        logger.info("Интерфейс инициализирован")
 
     # Настройки
     def setup_hotkeys(self):
@@ -316,7 +316,6 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.start()
             self.system_chat.append("🌐 Сеть перезапущена с новыми параметрами")
 
-
     def focus_message_input(self):
         """Переключает фокус на поле ввода активной вкладки чата"""
         current_tab = self.tabs.currentWidget()
@@ -365,10 +364,8 @@ class P2PMainWindow(QMainWindow):
                 logger.info(f"Горячая клавиша: выключн микрофон (видеозвонок)")
                 return
         logger.debug("Нет активного звонка для управления микрофоном")
-
     
     # сеть и интерфейс
-
     def _finalize_call_accept(self, call_id, call_window):
         """Завершающая стадия принятия звонка"""
         try:
@@ -428,21 +425,21 @@ class P2PMainWindow(QMainWindow):
         self.system_chat.setReadOnly(True)
         system_layout.addWidget(self.system_chat)
         
-        self.tabs.addTab(system_tab, "📊 P2P Система")
+        self.tabs.addTab(system_tab, "📊 Система")
         
     def create_menu(self):
         """Создание меню приложения"""
         menubar = self.menuBar()
         
-        # Меню Файл
-        file_menu = menubar.addMenu('Файл')
+        # Меню файл
+        file_menu = menubar.addMenu('Система')
 
         refresh_action = QAction('🔄 Обновить список пользователей', self)
         refresh_action.triggered.connect(self.refresh_user_list)
         file_menu.addAction(refresh_action)
         
         # Добавляем действие диагностики
-        debug_action = QAction('🔍 Диагностика P2P', self)
+        debug_action = QAction('🔍 Диагностика сети', self)
         debug_action.triggered.connect(self.debug_p2p_structure)
         file_menu.addAction(debug_action)
         
@@ -931,8 +928,6 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.open_chat: Ошибка открытия чата: {e}")
             import traceback
             logger.error(traceback.format_exc())
-
-
 
     def on_tab_changed(self, index):
         """Обработчик изменения активной вкладки"""
@@ -1707,6 +1702,29 @@ class P2PMainWindow(QMainWindow):
             self.update_peers_from_p2p()
             self.system_chat.append("🔄 Обновление списка пиров...")
         
+    # ========== НОВЫЕ МЕТОДЫ ДЛЯ ЧЁРНОГО СПИСКА ==========
+    def block_user(self, username: str):
+        """Заблокировать пользователя"""
+        if self.p2p_client and hasattr(self.p2p_client, 'db'):
+            self.p2p_client.db.add_to_blacklist(username)
+            self.system_chat.append(f"🚫 Пользователь {username} добавлен в чёрный список")
+            # Закрыть чат, если открыт
+            if username in self.chat_windows:
+                tab_index = self.tabs.indexOf(self.chat_windows[username])
+                if tab_index >= 0:
+                    self.tabs.removeTab(tab_index)
+                del self.chat_windows[username]
+            # Обновить список пользователей (заблокированный скроется)
+            self.refresh_user_list()
+
+    def unblock_user(self, username: str):
+        """Разблокировать пользователя"""
+        if self.p2p_client and hasattr(self.p2p_client, 'db'):
+            self.p2p_client.db.remove_from_blacklist(username)
+            self.system_chat.append(f"✅ Пользователь {username} удалён из чёрного списка")
+            self.refresh_user_list()
+    # ====================================================
+
     def start_p2p_messaging(self):
         """Запуск работы P2P мессенджера - синхронная версия"""
         try:
@@ -1820,8 +1838,6 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.send_file(username, file_path)
         else:
             QMessageBox.warning(self, "Ошибка", "P2P клиент не инициализирован")
-
-
 
     def on_file_received(self, from_user, save_path):
         """Обработка получения файла от другого пользователя"""
@@ -2198,7 +2214,6 @@ class P2PMainWindow(QMainWindow):
         logger.info(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
         self.system_chat.append(f"📹 Отправлен запрос на видеозвонок пользователю {username}")
 
-
     def _retry_audio_socket(self, video_window, call_id, username, is_outgoing):
         audio_socket = self.p2p_client.setup_call_connection(call_id, username, is_outgoing=is_outgoing)
         if audio_socket:
@@ -2206,8 +2221,7 @@ class P2PMainWindow(QMainWindow):
             logger.info(f"Аудио-сокет для {call_id} успешно создан с повторной попытки")
         else:
             logger.warning(f"Не удалось создать аудио-сокет для {call_id} после повторной попытки")
-        
-    
+         
     def handle_call_accepted(self, from_user, call_id):
         logger.info(f"🔊 Звонок принят пользователем {from_user}")
         with self.calls_lock:
@@ -2298,8 +2312,7 @@ class P2PMainWindow(QMainWindow):
         event.accept()
 
 class P2PDialogApplication:
-    """Класс управления P2P приложением"""
-    
+    """Класс управления P2P приложением"""   
     def __init__(self, bootstrap_nodes=None):
         self.bootstrap_nodes = bootstrap_nodes or []
         self.app = QApplication(sys.argv)

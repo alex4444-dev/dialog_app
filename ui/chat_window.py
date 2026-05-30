@@ -28,8 +28,7 @@ class ChatWindow(QWidget):
         
         # Проверяем, что все методы существуют ПОСЛЕ init_ui()
         self.check_methods()
-        
-    
+
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
         try:
@@ -225,7 +224,6 @@ class ChatWindow(QWidget):
             logger.info(f"ChatWindow.clear_chat: История чата с {self.username} очищена")
         except Exception as e:
             logger.error(f"ChatWindow.clear_chat: Ошибка очистки чата: {e}")
-
 
     def send_file(self):
         from PyQt5.QtWidgets import QFileDialog

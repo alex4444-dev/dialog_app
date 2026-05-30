@@ -19,8 +19,6 @@ from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
 
-
-
 # Добавляем путь к текущей директории для импорта модулей
 root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
@@ -102,7 +100,6 @@ class P2PNetworkClient(QObject):
     video_socket_ready = pyqtSignal(str, object)
     file_received = pyqtSignal(str, str)  # from_username, save_path
     file_progress = pyqtSignal(str, int, int)  # file_id, sent_bytes, total_bytes
-
     
     def __init__(self, db, port=8890, bootstrap_nodes=None):
         super().__init__()
@@ -607,7 +604,6 @@ class P2PNetworkClient(QObject):
         else:
             logger.error(f"Пир {peer_id} не найден для отправки answer")
     
-
     def get_peers_from_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
         """Синхронное получение списка пиров от bootstrap сервера"""
         try:
@@ -1439,7 +1435,6 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Критическая ошибка в setup_call_connection: {e}")
             return None
 
-
     def _is_client_socket(self, sock):
         """Проверяет, что сокет жив, не является слушающим (серверным), в том числе SecureChannel."""
         if sock is None:
@@ -1678,6 +1673,16 @@ class P2PNetworkClient(QObject):
 
         logger.debug(f"📨 Получено сообщение типа '{message_type}' от {peer_id}")
     
+        # Для сообщений и звонков – проверяем чёрный список (если есть имя отправителя)
+        from_user = data.get('from') or data.get('username')
+        if from_user and self.db and self.db.is_blocked(from_user):
+            logger.info(f"🚫 Игнорируем сообщение/звонок от заблокированного пользователя {from_user}")
+            # Для звонка можно отправить автоматический reject
+            if message_type == 'call_request':
+                call_id = data.get('call_id')
+                if call_id:
+                    self.send_call_response(call_id, 'reject')
+            return
 
         if message_type == 'chat_message':
             self._handle_chat_message(data, peer_id)

@@ -32,9 +32,7 @@ except ImportError as e:
     print("Убедитесь, что все файлы находятся в правильной структуре папок")
     sys.exit(1)
 
-
 MAX_AUDIO_PACKET_SIZE = 65536  # до 4096 сэмплов float32
-
 
 logger = logging.getLogger('dialog_video')
 
@@ -356,8 +354,6 @@ class VideoCallWindow(QWidget):
         self.call_id = call_id
         self.is_outgoing = is_outgoing
         self._is_closing = False
-
-        
 
         # Вместо аудио-окна создаём ядро аудио
         self.audio_core = AudioCallCore(
@@ -1085,7 +1081,6 @@ class VideoCallWindow(QWidget):
 
         painter.fillRect(rect, gradient)
         
-
 class AudioCallCore:
     """Управляет аудио-потоками для видеозвонка (без GUI)"""
     def __init__(self, call_id, input_device=None, output_device=None, sample_rate=44100, chunk_size=4096):
@@ -1115,7 +1110,6 @@ class AudioCallCore:
         if self.audio_socket and hasattr(self.audio_socket, 'settimeout'):
             self.audio_socket.settimeout(2.0)
        
-
     def start_streams(self):
         if self._streams_started:
             logger.warning("AudioCallCore: потоки уже запущены, игнорируем повторный запуск")
@@ -1366,7 +1360,6 @@ class AudioCallCore:
             logger.warning("AudioCallCore: попытка запуска без аудиосокета")
             self.is_running = False
         
-
     def stop(self):
         self._streams_started = False
         self.is_running = False

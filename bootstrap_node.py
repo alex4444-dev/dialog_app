@@ -212,7 +212,6 @@ class BootstrapServer:
             await self.server.wait_closed()
             logger.info("🛑 Bootstrap сервер остановлен")
 
-
 async def main():
     parser = argparse.ArgumentParser(description='Bootstrap сервер для мессенджера Диалог')
     parser.add_argument('--host', default='0.0.0.0', help='Хост для прослушивания')
