@@ -430,6 +430,10 @@ class P2PMainWindow(QMainWindow):
     def create_menu(self):
         """Создание меню приложения"""
         menubar = self.menuBar()
+        menubar.setStyleSheet("""
+            QMenuBar { font-size: 16px; font-weight:bold; }
+            QMenu { font-size: 16px; font-weight:bold; }
+        """)
         
         # Меню файл
         file_menu = menubar.addMenu('Система')
@@ -440,7 +444,6 @@ class P2PMainWindow(QMainWindow):
         
         # Добавляем действие диагностики
         debug_action = QAction('🔍 Диагностика сети', self)
-        debug_action.triggered.connect(self.debug_p2p_structure)
         file_menu.addAction(debug_action)
         
         file_menu.addSeparator()
@@ -503,20 +506,13 @@ class P2PMainWindow(QMainWindow):
     def setup_p2p_integration(self):
         """Интеграция с P2P сетью - безопасная версия"""
         try:
-            self.system_chat.append("🔧 Настройка интеграции с P2PNetworkClient...")
-            
             # Проверяем, что P2P клиент доступен и работает
             if not hasattr(self, 'p2p_client') or self.p2p_client is None:
-                self.system_chat.append("❌ P2P клиент не доступен")
                 return
             
             if not hasattr(self.p2p_client, 'is_running') or not self.p2p_client.is_running:
-                self.system_chat.append("❌ P2P клиент не запущен")
                 return
-        
-            # Запускаем диагностику
-            self.debug_p2p_structure()
-
+                    
             # Создаем таймер для обновления списка пиров, если его нет
             if not hasattr(self, 'peer_update_timer'):
                 self.peer_update_timer = QTimer()
@@ -527,75 +523,15 @@ class P2PMainWindow(QMainWindow):
         
             # Первоначальное обновление
             QTimer.singleShot(1000, self.update_peers_from_p2p)
-            self.system_chat.append("✅ P2P интеграция настроена")
-            self.statusBar().showMessage("✅ P2P сеть активна")
+            self.statusBar().showMessage("✅ Сеть активна")
 
         except Exception as e:
-            error_msg = f"❌ Ошибка настройки P2P интеграции: {e}"
-            self.logger.error(f"Ошибка настройки P2P интеграции: {e}")
+            error_msg = f"❌ Ошибка настройки интеграции сети: {e}"
+            self.logger.error(f"Ошибка настройки интеграции сети: {e}")
             self.system_chat.append(error_msg)
-
-    def debug_p2p_structure(self):
-        """Отладочная информация о структуре P2PNetworkClient"""
-        try:
-            self.system_chat.append("🔍 Диагностика P2PNetworkClient:")
-            
-            if not hasattr(self, 'p2p_client'):
-                self.system_chat.append("  ❌ p2p_client не существует")
-                return
-                
-            p2p_client = self.p2p_client
-            self.system_chat.append(f"  ✅ p2p_client: {type(p2p_client)}")
-            
-            # Проверяем основные атрибуты P2PNetworkClient
-            attrs = ['connected_peers', 'known_peers', 'start', 'stop', 'is_running', 'bootstrap_connected', 'port']
-            for attr in attrs:
-                if hasattr(p2p_client, attr):
-                    value = getattr(p2p_client, attr)
-                    if callable(value):
-                        self.system_chat.append(f"  ✅ {attr}: метод")
-                    elif hasattr(value, '__len__'):
-                        self.system_chat.append(f"  ✅ {attr}: {len(value)} элементов")
-                    else:
-                        self.system_chat.append(f"  ✅ {attr}: {value}")
-                else:
-                    self.system_chat.append(f"  ❌ {attr}: отсутствует")
-            
-            # Детальная информация о connected_peers
-            if hasattr(p2p_client, 'connected_peers'):
-                connected_peers = p2p_client.connected_peers
-                self.system_chat.append(f"  📊 connected_peers: {len(connected_peers)} элементов")
-                if len(connected_peers) > 0:
-                    for i, peer in enumerate(list(connected_peers)[:3]):  # Показываем первые 3
-                        self.system_chat.append(f"    {i+1}. {peer} (тип: {type(peer)})")
-                        if hasattr(peer, 'host') and hasattr(peer, 'port'):
-                            self.system_chat.append(f"      host: {peer.host}, port: {peer.port}")
-                        elif isinstance(peer, tuple) and len(peer) == 2:
-                            self.system_chat.append(f"      host: {peer[0]}, port: {peer[1]}")
-                else:
-                    self.system_chat.append("    📭 Список пуст")
-            
-            # Детальная информация о known_peers
-            if hasattr(p2p_client, 'known_peers'):
-                known_peers = p2p_client.known_peers
-                self.system_chat.append(f"  📊 known_peers: {len(known_peers)} элементов")
-                if len(known_peers) > 0:
-                    for i, peer in enumerate(list(known_peers)[:3]):  # Показываем первые 3
-                        self.system_chat.append(f"    {i+1}. {peer} (тип: {type(peer)})")
-                        if isinstance(peer, tuple) and len(peer) == 2:
-                            self.system_chat.append(f"      host: {peer[0]}, port: {peer[1]}")
-                else:
-                    self.system_chat.append("    📭 Список пуст")
-                    
-        except Exception as e:
-            self.system_chat.append(f"❌ Ошибка диагностики: {e}")
-
+ 
     def handle_message(self, username, message):
         """Обработка полученного сообщения"""
-        logger.info(f"P2PMainWindow.handle_message: Получено сообщение от {username}: {message}")
-        
-        self.system_chat.append(f"📨 Получено сообщение от {username}: {message}")
-        
         if username == "system":
             self.system_chat.append(f"📢 Система: {message}")
             return
@@ -608,7 +544,7 @@ class P2PMainWindow(QMainWindow):
             self.sound_manager.play('message')
         
         if username in self.chat_windows:
-            logger.info(f"P2PMainWindow.handle_message: Добавление сообщения в чат с {username}")
+            logger.info(f"MainWindow.handle_message: Добавление сообщения в чат с {username}")
             chat_window = self.chat_windows[username]
             
             if chat_window and hasattr(chat_window, 'add_message'):
@@ -622,13 +558,13 @@ class P2PMainWindow(QMainWindow):
                 if not is_active:
                     index = self.tabs.indexOf(chat_window)
                     if index >= 0:
-                        logger.info(f"P2PMainWindow.handle_message: Вкладка чата с {username} не активна")
+                        logger.info(f"MainWindow.handle_message: Вкладка чата с {username} не активна")
                 else:
-                    logger.info(f"P2PMainWindow.handle_message: Вкладка чата с {username} активна")
+                    logger.info(f"MainWindow.handle_message: Вкладка чата с {username} активна")
             else:
-                logger.error(f"P2PMainWindow.handle_message: Чат с {username} не инициализирован правильно")
+                logger.error(f"MainWindow.handle_message: Чат с {username} не инициализирован правильно")
         else:
-            logger.error(f"P2PMainWindow.handle_message: Не удалось найти чат с {username}")
+            logger.error(f"MainWindow.handle_message: Не удалось найти чат с {username}")
             self.system_chat.append(f"❌ Ошибка: не удалось открыть чат с {username}")
             
         QApplication.processEvents()
@@ -720,11 +656,10 @@ class P2PMainWindow(QMainWindow):
         try:
             if hasattr(self.p2p_client, '_auto_connect_to_known_peers'):
                 self.p2p_client._auto_connect_to_known_peers()
-                self.system_chat.append("🔄 Принудительное подключение к известным пирам...")
             else:
-                self.system_chat.append("❌ Метод автоматического подключения не доступен")
+                self.logger.info("❌ Метод автоматического подключения не доступен")
         except Exception as e:
-            self.system_chat.append(f"❌ Ошибка принудительного подключения: {e}")
+            self.logger.error(f"❌ Ошибка принудительного подключения: {e}")
 
     def update_user_list(self, users):
         """Обновление списка пользователей"""
@@ -812,9 +747,7 @@ class P2PMainWindow(QMainWindow):
    
     def handle_call(self, action, from_user, call_type, call_id):
         """Обработка входящего звонка через P2P сеть"""
-        logger.info(f"P2PMainWindow.handle_call: Обработка звонка: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
-
-        self.system_chat.append(f"🔊 Сигнал звонка: {action} от {from_user}")
+        logger.info(f"MainWindow.handle_call: Обработка звонка: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
 
         if action == 'incoming_call':
             if call_type == 'video':
@@ -1167,7 +1100,6 @@ class P2PMainWindow(QMainWindow):
             
             # Проверяем доступность P2P клиента
             if not hasattr(self, 'p2p_client') or self.p2p_client is None:
-                self.system_chat.append("❌ P2P клиент не инициализирован")
                 return
             
             p2p_client = self.p2p_client
@@ -1182,12 +1114,8 @@ class P2PMainWindow(QMainWindow):
                         peer for peer in connected_peers 
                         if not self._is_bootstrap_peer(peer, p2p_client)
                     ]
-                    self.system_chat.append(f"📊 Найдено {len(connected_peers)} подключенных пиров (исключая bootstrap)")
                 except Exception as e:
                     self.logger.warning(f"Ошибка получения connected_peers: {e}")
-            
-            # Остальной код обработки пиров...
-            # [существующий код метода]
             
         except Exception as e:
             self.logger.error(f"Ошибка получения информации о пирах: {e}")
@@ -1226,7 +1154,7 @@ class P2PMainWindow(QMainWindow):
             self.update_network_status(is_connected, connected_count)
         
             # Логируем результат
-            self.logger.info(f"Обновлено {len(peers_data)} пиров (подключено: {connected_count})")
+            self.logger.info(f"Обновлено {len(peers_data)} пользователей (подключено: {connected_count})")
         
         except Exception as e:
             self.logger.error(f"Ошибка: {e}")
@@ -1300,17 +1228,17 @@ class P2PMainWindow(QMainWindow):
             if hasattr(self.p2p_client, 'network') and hasattr(self.p2p_client.network, 'connect_to_peer'):
                 success = self.p2p_client.network.connect_to_peer_sync(host, port)
                 if success:
-                    self.system_chat.append(f"✅ Подключение к {host}:{port} выполнено")
+                    self.logger.info(f"✅ Подключение к {host}:{port} выполнено")
                     # Обновляем список пиров через короткое время
                     QTimer.singleShot(1000, self.update_peers_from_p2p)
                 else:
-                    self.system_chat.append(f"❌ Не удалось подключиться к {host}:{port}")
+                    self.logger.error(f"❌ Не удалось подключиться к {host}:{port}")
             else:
-                self.system_chat.append(f"⚠️ Метод подключения к пирам не доступен")
+                self.logger.error(f"⚠️ Метод подключения к пирам не доступен")
             
         except Exception as e:
             self.logger.error(f"Ошибка подключения к пиру: {e}")
-            self.system_chat.append(f"❌ Ошибка подключения: {e}")
+            self.system_chat.append(f"❌ Ошибка подключения к сети: {e}")
   
     def disconnect_from_peer(self, host: str, port: int):
         """Отключиться от пира"""
@@ -1642,7 +1570,7 @@ class P2PMainWindow(QMainWindow):
         try:
             network_info = self.get_network_info()
         
-            info_text = f"P2P Сеть:\n\n"
+            info_text = f"Сеть:\n\n"
             info_text += f"Подключенные пиры: {network_info.get('connected_peers', 0)}\n"
             info_text += f"Известные пиры: {network_info.get('known_peers', 0)}\n"
             info_text += f"Статус: {network_info.get('status', 'Unknown')}\n"
@@ -1700,7 +1628,7 @@ class P2PMainWindow(QMainWindow):
         if hasattr(self, 'p2p_client') and self.p2p_client.is_running and self.is_authenticated:
             # Обновляем информацию о пирах
             self.update_peers_from_p2p()
-            self.system_chat.append("🔄 Обновление списка пиров...")
+            self.system_chat.append("🔄 Обновление списка пользователей...")
         
     # ========== НОВЫЕ МЕТОДЫ ДЛЯ ЧЁРНОГО СПИСКА ==========
     def block_user(self, username: str):
@@ -1728,24 +1656,20 @@ class P2PMainWindow(QMainWindow):
     def start_p2p_messaging(self):
         """Запуск работы P2P мессенджера - синхронная версия"""
         try:
-            self.system_chat.append("🔄 Запуск P2P сети...")
+            self.system_chat.append("🔄 Запуск сети...")
             
             # Проверяем наличие P2P клиента
             if not hasattr(self, 'p2p_client') or self.p2p_client is None:
-                self.system_chat.append("❌ P2P клиент не инициализирован")
-                self.statusBar().showMessage("❌ P2P клиент не инициализирован")
+                self.statusBar().showMessage("❌ Клиент не инициализирован")
                 return False
             
-            # Проверяем состояние P2P клиента
-            self.system_chat.append(f"✅ P2P клиент найден: {type(self.p2p_client)}")
+            
                 
             # Запускаем P2P сеть
             if hasattr(self.p2p_client, 'start'):
-                self.system_chat.append("🔧 Вызов p2p_client.start()...")
                 success = self.p2p_client.start()
                 if success:
-                    self.system_chat.append("✅ P2P сеть запущена")
-                    self.statusBar().showMessage("✅ P2P сеть запущена")
+                    self.statusBar().showMessage("✅ Сеть запущена")
 
                     # Автоматическое подключение к пирам через 10 секунд
                     QTimer.singleShot(10000, self.force_connect_peers)
@@ -1761,18 +1685,17 @@ class P2PMainWindow(QMainWindow):
                     self.system_chat.append(f"✅ Успешный вход как: {self.username}")
                     return True
                 else:
-                    self.system_chat.append("❌ Не удалось запустить P2P сеть")
-                    self.statusBar().showMessage("❌ Не удалось запустить P2P сеть")
+                    self.system_chat.append("❌ Не удалось запустить сеть")
+                    self.statusBar().showMessage("❌ Не удалось запустить сеть")
                     return False
             else:
-                self.system_chat.append("⚠️ P2P клиент не имеет метода start")
-                self.statusBar().showMessage("⚠️ P2P клиент не имеет метода start")
+                self.statusBar().showMessage("⚠️ Клиент не имеет метода start")
                 return False          
         except Exception as e:
-            error_msg = f"❌ Ошибка запуска P2P сети: {e}"
+            error_msg = f"❌ Ошибка запуска сети: {e}"
             self.logger.error(error_msg)
             self.system_chat.append(error_msg)
-            self.statusBar().showMessage("❌ Ошибка запуска P2P сети")
+            self.statusBar().showMessage("❌ Ошибка запуска сети")
             return False
     
     def start_listen_for_updates(self):
@@ -1894,7 +1817,7 @@ class P2PMainWindow(QMainWindow):
             self.statusBar().showMessage(status_text)
             # Обновляем системный чат
             if hasattr(self, 'system_chat'):
-                self.system_chat.append(f"🌐 Сеть: подключено {peer_count} пиров")
+                self.logger.info(f"🌐 Сеть: подключено {peer_count} пиров")
         else:
             status_text = "❌ P2P сеть: Не подключено"
             self.statusBar().showMessage(status_text)

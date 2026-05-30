@@ -278,13 +278,13 @@ class P2PNetworkClient(QObject):
             self.webrtc_thread = threading.Thread(target=self._start_webrtc_loop, daemon=True)
             self.webrtc_thread.start()
         
-            logger.info(f"🚀 P2P клиент запущен на порту {self.listen_port}")
-            self.connection_status_changed.emit("✅ P2P сеть запущена")
+            logger.info(f"🚀 Клиент запущен на порту {self.listen_port}")
+            self.connection_status_changed.emit("✅ Сеть запущена")
             return True
         
         except Exception as e:
-            logger.error(f"Ошибка запуска P2P клиента: {e}")
-            self.connection_status_changed.emit("❌ Ошибка запуска P2P сети")
+            logger.error(f"Ошибка запуска клиента: {e}")
+            self.connection_status_changed.emit("❌ Ошибка запуска сети")
             return False
 
     def stop(self):
@@ -660,7 +660,19 @@ class P2PNetworkClient(QObject):
         
         logger.info(f"✅ Ручное подключение завершено: {connected_count} успешных подключений")
         return connected_count
-        
+
+    def get_peers_list(self) -> List[Dict]:
+        """Возвращает список подключённых пиров для отображения в интерфейсе."""
+        peers = []
+        for peer_id, peer_info in self.connected_peers.items():
+            peers.append({
+                'id': peer_id,
+                'address': f"{peer_info['address'][0]}:{peer_info['address'][1]}",
+                'username': peer_info.get('username', 'unknown'),
+                'connected_at': peer_info.get('connected_at')
+            })
+        return peers
+
     def _load_known_peers(self):
         """Загрузка известных пиров из базы данных"""
         try:

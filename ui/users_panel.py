@@ -152,7 +152,6 @@ class UsersPanel(QWidget):
 
     def debug_show_received_data(self, users):
         """Метод для отладки - показать полученные данные"""
-        logger.info("=== ДЕБАГ: Полученные данные для users_panel ===")
         if not users:
             logger.info("Пустой список users")
             return
@@ -162,8 +161,7 @@ class UsersPanel(QWidget):
             if isinstance(user, dict):
                 for key, value in user.items():
                     logger.info(f"  {key}: {value} (тип: {type(value)})")
-        logger.info("=== КОНЕЦ ДЕБАГА ===")
-
+        
     def on_user_double_clicked(self, item):
         """Обработка двойного клика по пользователю - УПРОЩЕННАЯ ВЕРСИЯ"""
         if not item:
@@ -227,7 +225,7 @@ class UsersPanel(QWidget):
     def update_network_status(self, is_connected: bool, peer_count: int = 0):
         """Обновление статуса сети"""
         if is_connected:
-            self.network_status.setText(f"Сеть: ✅ Подключено ({peer_count} пиров)")
+            self.network_status.setText(f"Сеть: ✅ Подключено ({peer_count} Пользователей)")
             self.network_status.setStyleSheet("""
                 font-size: 12px;
                 color: #27ae60;
@@ -236,12 +234,12 @@ class UsersPanel(QWidget):
                 border-radius: 4px;
             """)
         else:
-            self.network_status.setText("Сеть: ❌ Не подключено")
+            self.network_status.setText("Сеть: ❌ Список пуст")
             self.network_status.setStyleSheet("""
                 font-size: 12px;
-                color: #e74c3c;
+                color: #2a4b5c;
                 padding: 4px;
-                background-color: #fadbd8;
+                background-color: #d5f4e6;
                 border-radius: 4px;
             """)
         
