@@ -435,16 +435,12 @@ class P2PMainWindow(QMainWindow):
             QMenu { font-size: 16px; font-weight:bold; }
         """)
         
-        # Меню файл
-        file_menu = menubar.addMenu('Система')
+        # Меню сервис
+        file_menu = menubar.addMenu('Сервис')
 
         refresh_action = QAction('🔄 Обновить список пользователей', self)
         refresh_action.triggered.connect(self.refresh_user_list)
         file_menu.addAction(refresh_action)
-        
-        # Добавляем действие диагностики
-        debug_action = QAction('🔍 Диагностика сети', self)
-        file_menu.addAction(debug_action)
         
         file_menu.addSeparator()
         
@@ -453,7 +449,7 @@ class P2PMainWindow(QMainWindow):
         add_peer_action.triggered.connect(self.show_add_peer_dialog)
         file_menu.addAction(add_peer_action)
 
-        # В меню Файл добавьте:
+        # В меню Сервис добавьте:
         force_connect_action = QAction('🔗 Принудительно подключиться к пирам', self)
         force_connect_action.triggered.connect(self.force_connect_peers)
         file_menu.addAction(force_connect_action)
@@ -474,11 +470,6 @@ class P2PMainWindow(QMainWindow):
         notifications_menu.addAction(self.enable_notifications_action)
         
         file_menu.addSeparator()
-        
-        # Выход из системы
-        logout_action = QAction('🚪 Выйти из системы', self)
-        logout_action.triggered.connect(self.logout)
-        file_menu.addAction(logout_action)
         
         # Выход из приложения
         exit_action = QAction('❌ Выйти', self)
