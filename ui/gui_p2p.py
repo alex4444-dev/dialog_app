@@ -833,6 +833,12 @@ class P2PMainWindow(QMainWindow):
             logger.info(f"P2PMainWindow.open_chat: Создание нового чата с {clean_username}")
             chat_window = ChatWindow(clean_username, host, port)
 
+            # Загрузка истории сообщений
+            messages = self.db.get_user_messages(self.username, clean_username, limit=200)
+            for msg in messages:
+                is_own = (msg['from_user'] == self.username)
+                chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own)
+                
             # Подключаем сигналы
             chat_window.message_sent.connect(self.on_message_sent)
             chat_window.unread_count_changed.connect(self.on_unread_count_changed)
@@ -912,6 +918,9 @@ class P2PMainWindow(QMainWindow):
         """Обработчик отправки сообщения из чата"""
         try:
             logger.info(f"P2PMainWindow.on_message_sent: Отправка сообщения для {username}: {message}")
+            # Сохраняем сообщение в БД
+            self.db.store_message(self.username, username, message)
+            
             # Вызываем метод отправки сообщения из P2P клиента
             if hasattr(self, 'p2p_client') and self.p2p_client:
                 self.p2p_client.send_message(username, message)
