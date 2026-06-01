@@ -60,6 +60,7 @@ class P2PMainWindow(QMainWindow):
     sig_system_message = pyqtSignal(str)
     sig_call_status = pyqtSignal(str, str)
     
+    
     def __init__(self, p2p_client, username, db):
         super().__init__()
         self.p2p_client = p2p_client
@@ -1728,8 +1729,15 @@ class P2PMainWindow(QMainWindow):
             self.system_chat.append(f"⚠️ Ошибка получения обновлений: {e}")
   
     def close_application(self):
-        """Закрытие приложения"""
-        self.close()
+        """Закрытие приложения"""        
+        reply = QMessageBox.question(self, 'Выход из программы', 
+                                   'Вы уверены, что хотите выйти из программы?',
+                                   QMessageBox.Yes | QMessageBox.No)
+        
+        if reply == QMessageBox.Yes:
+            self.disconnect_from_network()
+            self.close()
+        
         
     def disconnect_from_network(self):
         """Отключение от P2P сети"""
@@ -2217,15 +2225,7 @@ class P2PMainWindow(QMainWindow):
             except ValueError:
                 QMessageBox.warning(self, 'Ошибка', 'Неверный порт')
 
-    def logout(self):
-        """Выход из системы"""
-        reply = QMessageBox.question(self, 'Выход из системы', 
-                                   'Вы уверены, что хотите выйти из системы?',
-                                   QMessageBox.Yes | QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
-            self.disconnect_from_network()
-            self.close()
+    
     
     def closeEvent(self, event):
         """Обработчик закрытия окна"""
@@ -2242,6 +2242,7 @@ class P2PDialogApplication:
         self.db = ClientDatabase()
         self.auth_manager = AuthManager(self.db)
         self.p2p_client = P2PNetworkClient(self.db, bootstrap_nodes=self.bootstrap_nodes)
+        
         self.auth_window = None
         self.main_window = None
         
