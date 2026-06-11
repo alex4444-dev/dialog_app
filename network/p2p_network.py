@@ -14,6 +14,7 @@ import logging.handlers
 import socket
 import random
 import json
+import yaml
 from typing import Dict, List, Optional, Callable
 from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
@@ -101,7 +102,7 @@ class P2PNetworkClient(QObject):
     file_received = pyqtSignal(str, str)  # from_username, save_path
     file_progress = pyqtSignal(str, int, int)  # file_id, sent_bytes, total_bytes
     
-    def __init__(self, db, port=8890, bootstrap_nodes=None):
+    def __init__(self, db, port=8890, bootstrap_nodes=None, config_path="config.yaml"):
         super().__init__()
         self.db = db
         self.username = None
@@ -144,6 +145,25 @@ class P2PNetworkClient(QObject):
         self.call_requests = {}  # call_id -> call_info
         self.active_file_transfers = {}  # file_id -> transfer_info
         self.settings = QSettings('DialogApp', 'P2PClient')
+        # Загружаем конфиг
+        self.config = self._load_config(config_path)
+
+    def _load_config(self, config_path):
+        """Загружает config.yaml из папки с приложением или из _MEIPASS (если скомпилировано)."""
+        import sys
+        if getattr(sys, 'frozen', False):
+            # Работаем из скомпилированного EXE
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        full_path = os.path.join(base_path, config_path)
+        try:
+            with open(full_path, 'r', encoding='utf-8') as f:
+                return yaml.safe_load(f)
+        except Exception as e:
+            logger.error(f"Не удалось загрузить {full_path}: {e}")
+            return {}
+
 
     def _get_local_ip(self) -> str:
         """Определяет IP-адрес машины в локальной сети (не localhost)."""
@@ -334,50 +354,70 @@ class P2PNetworkClient(QObject):
         future = asyncio.run_coroutine_threadsafe(coro, self.webrtc_loop)
         return future.result(timeout=10)
 
-    async def _create_webrtc_offer(self, peer_id: str, peer_info: dict):
-        """Создать offer для установки WebRTC-соединения с пиром"""
+    async def _create_webrtc_offer(self, peer_id: str, peer_info: dict, offer_data: dict):
+        """
+        Создаёт WebRTC answer в ответ на offer от пира.
+        offer_data: {'sdp': '...', 'sdp_type': 'offer'}
+        """
         from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
-        
-        # Конфигурация ICE из config.yaml
+
+        # Загружаем ICE-серверы из конфига
         ice_servers = []
         for srv in self.config.get('media', {}).get('ice_servers', []):
-            ice_servers.append(RTCIceServer(urls=srv['urls']))
-        
+            urls = srv['urls']
+            username = srv.get('username', '')
+            credential = srv.get('credential', '')
+            if username and credential:
+                ice_servers.append(RTCIceServer(urls=urls, username=username, credential=credential))
+            else:
+                ice_servers.append(RTCIceServer(urls=urls))
+
         config = RTCConfiguration(iceServers=ice_servers)
         pc = RTCPeerConnection(configuration=config)
-        
-        # Создаём DataChannel для обмена сообщениями (поверх WebRTC)
-        channel = pc.createDataChannel("dialog")
-        
-        @channel.on("open")
-        def on_open():
-            logger.info(f"✅ WebRTC DataChannel открыт с {peer_id}")
-            # После открытия канала можно отправить приветствие или сразу использовать
-            pass
-    
-        @channel.on("message")
-        def on_message(message):
-            # message – это bytes (или str). Здесь уже будет ваше зашифрованное сообщение.
-            # Обрабатываем так же, как в _process_received_data
-            try:
-                if isinstance(message, bytes):
-                    data = json.loads(message.decode('utf-8'))
-                else:
-                    data = json.loads(message)
-                # Имитируем получение от этого же peer_id
-                self._process_received_data(data, peer_id)
-            except Exception as e:
-                logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
-        
-        # Генерируем offer
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        
-        # Сохраняем pc и channel
+
+        # Обработчик входящего DataChannel (создаётся удалённой стороной)
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            logger.info(f"📡 Входящий DataChannel от {peer_id}, label={channel.label}")
+            self.webrtc_channels[peer_id] = channel
+
+            @channel.on("message")
+            def on_message(message):
+                try:
+                    if isinstance(message, bytes):
+                        data = json.loads(message.decode())
+                    else:
+                        data = json.loads(message)
+                    self._process_received_data(data, peer_id)
+                except Exception as e:
+                    logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+
+        # Устанавливаем remote description (offer)
+        offer = RTCSessionDescription(sdp=offer_data['sdp'], type=offer_data['sdp_type'])
+
+        async def set_remote_and_create_answer():
+            await pc.setRemoteDescription(offer)
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+            return pc.localDescription
+
+        answer_desc = await set_remote_and_create_answer()
+
+        # Сохраняем RTCPeerConnection для этого пира
         self.webrtc_connections[peer_id] = pc
-        self.webrtc_channels[peer_id] = channel
-        
-        return pc.localDescription
+
+        # Отправляем answer обратно через существующий TCP-канал
+        answer_msg = {
+            'type': 'webrtc_answer',
+            'sdp': answer_desc.sdp,
+            'sdp_type': answer_desc.type,
+            'peer_id': peer_id
+        }
+        if peer_info:
+            self._send_to_peer(peer_info, answer_msg)
+            logger.info(f"📤 WebRTC answer отправлен {peer_id}")
+        else:
+            logger.error(f"Пир {peer_id} не найден для отправки answer")
 
     async def _handle_webrtc_answer(self, peer_id: str, answer_sdp: str, answer_type: str):
         """Установить answer от пира"""
@@ -387,22 +427,26 @@ class P2PNetworkClient(QObject):
             return
         answer = RTCSessionDescription(sdp=answer_sdp, type=answer_type)
         await pc.setRemoteDescription(answer)
-    
+
     def _initiate_webrtc_connection(self, peer_id: str, peer_info: dict):
-        """Инициирует WebRTC соединение с пиром (отправляет offer)"""
+        """Инициирует WebRTC соединение с пиром (отправляет offer)."""
         from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
 
-        # Загружаем STUN/TURN серверы из config (или ставим по умолчанию)
+        # Загружаем ICE-серверы из конфига
         ice_servers = []
-        # Если у вас есть config с секцией media.ice_servers, используйте её
-        # Для примера – публичные STUN
-        ice_servers.append(RTCIceServer(urls=["stun:stun.l.google.com:19302"]))
-        # Можно добавить TURN позже
+        for srv in self.config.get('media', {}).get('ice_servers', []):
+            urls = srv['urls']
+            username = srv.get('username', '')
+            credential = srv.get('credential', '')
+            if username and credential:
+                ice_servers.append(RTCIceServer(urls=urls, username=username, credential=credential))
+            else:
+                ice_servers.append(RTCIceServer(urls=urls))
 
         config = RTCConfiguration(iceServers=ice_servers)
         pc = RTCPeerConnection(configuration=config)
 
-        # Создаём DataChannel для обмена сообщениями (он будет открыт автоматически)
+        # Создаём DataChannel для обмена сообщениями
         channel = pc.createDataChannel("dialog")
 
         @channel.on("open")
@@ -411,10 +455,9 @@ class P2PNetworkClient(QObject):
 
         @channel.on("message")
         def on_message(message):
-            # Обработка входящего сообщения (уже расшифровано DTLS, но ваше E2E ещё поверх)
             try:
                 if isinstance(message, bytes):
-                    data = json.loads(message.decode('utf-8'))
+                    data = json.loads(message.decode())
                 else:
                     data = json.loads(message)
                 self._process_received_data(data, peer_id)
@@ -427,6 +470,7 @@ class P2PNetworkClient(QObject):
             await pc.setLocalDescription(offer)
             return pc.localDescription
 
+        # Запускаем асинхронную операцию в нашем event loop
         offer_desc = self._run_coro(create_offer())
 
         # Сохраняем объекты
@@ -437,7 +481,7 @@ class P2PNetworkClient(QObject):
         signal_msg = {
             'type': 'webrtc_offer',
             'sdp': offer_desc.sdp,
-            'sdp_type': offer_desc.type,   # обычно "offer"
+            'sdp_type': offer_desc.type,   # "offer"
             'peer_id': peer_id
         }
         if self._send_to_peer(peer_info, signal_msg):
@@ -1680,15 +1724,17 @@ class P2PNetworkClient(QObject):
             logger.error(f"Ошибка автоматического подключения: {e}")
         
     def _process_received_data(self, data: dict, peer_id: str):
-        """Обработка полученных данных с поддержкой обмена пирами"""
+        """
+        Обработка полученных данных от пира.
+        Вызывается как для обычных TCP-соединений, так и для WebRTC DataChannel.
+        """
         message_type = data.get('type')
-
         logger.debug(f"📨 Получено сообщение типа '{message_type}' от {peer_id}")
-    
-        # Для сообщений и звонков – проверяем чёрный список (если есть имя отправителя)
+
+        # Проверка чёрного списка (если отправитель известен)
         from_user = data.get('from') or data.get('username')
         if from_user and self.db and self.db.is_blocked(from_user):
-            logger.info(f"🚫 Игнорируем сообщение/звонок от заблокированного пользователя {from_user}")
+            logger.info(f"🚫 Игнорируем сообщение от заблокированного пользователя {from_user}")
             # Для звонка можно отправить автоматический reject
             if message_type == 'call_request':
                 call_id = data.get('call_id')
@@ -1696,20 +1742,27 @@ class P2PNetworkClient(QObject):
                     self.send_call_response(call_id, 'reject')
             return
 
+        # --- Сообщения чата ---
         if message_type == 'chat_message':
             self._handle_chat_message(data, peer_id)
         elif message_type == 'message_ack':
-            self._handle_message_ack(data)   
+            self._handle_message_ack(data)
         elif message_type == 'message':
             self._handle_message(data)
+
+        # --- Статус пользователей ---
         elif message_type == 'user_online':
             self._handle_user_online(data, peer_id)
         elif message_type == 'user_offline':
             self._handle_user_offline(data)
+
+        # --- Звонки ---
         elif message_type == 'call_request':
             self._handle_call_request(data)
-        elif message_type == 'call_response':  
+        elif message_type == 'call_response':
             self._handle_call_response(data)
+
+        # --- Файлы ---
         elif message_type == 'file_request':
             self._handle_file_request(data, peer_id)
         elif message_type == 'file_chunk':
@@ -1718,24 +1771,54 @@ class P2PNetworkClient(QObject):
             self._handle_file_complete(data, peer_id)
         elif message_type == 'file_ack':
             self._handle_file_ack(data, peer_id)
-        elif message_type == 'peer_exchange':  
+
+        # --- Обмен пирами (P2P discovery) ---
+        elif message_type == 'peer_exchange':
             self._handle_peer_exchange(data, peer_id)
-        elif message_type == 'ping':
-            self._handle_ping(data, peer_id)
-        elif message_type == 'pong':  
-            self._handle_pong(data, peer_id)
         elif message_type == 'peer_discovery':
             self._handle_peer_discovery(data)
+
+        # --- Системные ping/pong ---
+        elif message_type == 'ping':
+            self._handle_ping(data, peer_id)
+        elif message_type == 'pong':
+            self._handle_pong(data, peer_id)
+
+        # --- WebRTC сигнальные сообщения ---
+        elif message_type == 'webrtc_offer':
+            # data: {'sdp': '...', 'sdp_type': 'offer', 'peer_id': peer_id}
+            peer_id = data.get('peer_id')
+            if peer_id and peer_id in self.connected_peers:
+                # Запускаем асинхронную обработку в WebRTC event loop
+                asyncio.run_coroutine_threadsafe(
+                    self._create_webrtc_offer(peer_id, self.connected_peers[peer_id], data),
+                    self.webrtc_loop
+                )
+            else:
+                logger.warning(f"webrtc_offer от неизвестного пира {peer_id}")
+
+        elif message_type == 'webrtc_answer':
+            peer_id = data.get('peer_id')
+            if peer_id and peer_id in self.webrtc_connections:
+                pc = self.webrtc_connections[peer_id]
+                answer = RTCSessionDescription(sdp=data['sdp'], type=data['sdp_type'])
+                async def set_remote():
+                    await pc.setRemoteDescription(answer)
+                asyncio.run_coroutine_threadsafe(set_remote(), self.webrtc_loop)
+            else:
+                logger.warning(f"webrtc_answer для неизвестного соединения {peer_id}")
+
+        # --- Медиа-информация для звонков (установка аудио/видео портов) ---
         elif message_type == 'media_info':
             self._handle_media_info(data, peer_id)
-        elif message_type == 'webrtc_offer':
-            self._handle_webrtc_offer(data, peer_id)
-        elif message_type == 'webrtc_answer':
-            self._handle_webrtc_answer(data, peer_id)
-        elif message_type == 'media_ack':            
+
+        # --- Подтверждение установки медиа-канала ---
+        elif message_type == 'media_ack':
             logger.info(f"✅ Получено подтверждение медиа-соединения для звонка {data.get('call_id')}")
+
+        # --- Неизвестный тип ---
         else:
-            logger.warning(f"Неизвестный тип сообщения: {message_type}")
+            logger.warning(f"Неизвестный тип сообщения: {message_type} от {peer_id}")
 
     def send_message(self, to_username: str, message: str, message_id: str = None) -> bool:
         try:

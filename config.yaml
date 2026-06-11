@@ -1,11 +1,13 @@
 network:
+  external_ip: "5.18.190.216"
+  external_port: 8890
   min_port: 9000
   max_port: 10000
   max_port_attempts: 100
   bootstrap_nodes:
-    - {"host": "localhost", "port": 8888}
-    - {"host": "192.168.0.105", "port": 8888}
+    - {"host": "5.18.190.216", "port": 8888}
     - {"host": "192.168.0.109", "port": 8888}
+    - {"host": "192.168.0.105", "port": 8888}
   connection_timeout: 30
 
 
@@ -25,6 +27,9 @@ media:
     - {"urls": "stun:stun.ya.ru:3478"}
     - {"urls": "stun:stun.calls.yandex.ru:3478"}
     - {"urls": "stun:stun.mail.ru:3478"}
+    - {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"}
+    # Альтернатива: для некоторых версий нужен порт 443
+    - {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"}
     
 
 

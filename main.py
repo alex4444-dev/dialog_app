@@ -1,4 +1,6 @@
 # main.py
+from integrated_server import IntegratedServers
+
 import os
 import sys
 import logging
@@ -59,11 +61,18 @@ def main():
     # Создаем необходимые директории
     os.makedirs('data', exist_ok=True)
     os.makedirs('logs', exist_ok=True)
+
+    # Запускаем встроенные серверы (bootstrap + media)
+    integrated = IntegratedServers()
+    integrated.start()
     
     print("🎯 Инициализация приложения...")
     app = P2PDialogApplication(bootstrap_nodes=bootstrap_nodes)
     app.run()
     sys.exit(app.app.exec_())
+
+    # После закрытия GUI останавливаем серверы
+    integrated.stop()
 
 if __name__ == '__main__':
     main()
