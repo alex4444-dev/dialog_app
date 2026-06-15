@@ -73,6 +73,21 @@ class ClientDatabase:
                     blocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
+
+            # Таблица контактов (друзей)
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS contacts (
+                    contact_username TEXT PRIMARY KEY,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS contacts (
+                    contact_username TEXT PRIMARY KEY,
+                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')    
             conn.commit()
         finally:
             conn.close()
@@ -225,6 +240,48 @@ class ClientDatabase:
             return computed_hash == hash_value
         except:
             return False
+
+    
+
+    def add_contact(self, username: str) -> bool:
+        """Добавить пользователя в список контактов"""
+        if not self.user_exists(username):
+            return False
+        conn = self._get_connection()
+        try:
+            conn.execute('INSERT OR IGNORE INTO contacts (contact_username) VALUES (?)', (username,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+    
+    def remove_contact(self, username: str) -> bool:
+        """Удалить пользователя из списка контактов"""
+        conn = self._get_connection()
+        try:
+            conn.execute('DELETE FROM contacts WHERE contact_username = ?', (username,))
+            conn.commit()
+            return True
+        finally:
+            conn.close()
+
+    def is_contact(self, username: str) -> bool:
+        """Проверить, является ли пользователь контактом"""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute('SELECT 1 FROM contacts WHERE contact_username = ?', (username,))
+            return cursor.fetchone() is not None
+        finally:
+            conn.close()
+
+    def get_all_contacts(self) -> List[str]:
+        """Получить список всех имён контактов"""
+        conn = self._get_connection()
+        try:
+            cursor = conn.execute('SELECT contact_username FROM contacts ORDER BY added_at')
+            return [row[0] for row in cursor.fetchall()]
+        finally:
+            conn.close()
 
     def add_to_blacklist(self, username: str):
         conn = self._get_connection()

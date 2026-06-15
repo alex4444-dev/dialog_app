@@ -1,26 +1,27 @@
 network:
-  external_ip: "5.18.190.216"
-  external_port: 8890
   min_port: 9000
   max_port: 10000
   max_port_attempts: 100
-  bootstrap_nodes:
-    - {"host": "5.18.190.216", "port": 8888}
+  bootstrap_nodes:                   # Эти узлы используются для начального входа в сеть (и для DHT, и для P2P)
     - {"host": "192.168.0.109", "port": 8888}
     - {"host": "192.168.0.105", "port": 8888}
   connection_timeout: 30
 
+# ========== НОВАЯ СЕКЦИЯ DHT ==========
+dht:
+  enabled: true                      # Включить DHT-узел
+  port: 9891                         # UDP порт для DHT (должен отличаться от listen_port)
+  bootstrap_nodes:                   # Список DHT-бутстрап узлов (можно использовать те же, что и в network)
+    - {"host": "router.bittorrent.com", "port": 6881}
+    - {"host": "dht.transmissionbt.com", "port": 6881}
+    - {"host": "router.utorrent.com", "port": 6881}
+  refresh_interval: 3600             # Интервал перепубликации своего адреса (секунды)
+  storage_ttl: 86400                 # Время жизни записи в DHT (секунды) – по умолчанию 24 часа
 
-# НОВЫЕ СЕКЦИИ ДЛЯ ЗВОНКОВ:
 media:
-  # Аудио-кодек (например, Opus, PCMU)
   audio_codec: "opus"
-  # Битрейт аудио в кбит/с
   audio_bitrate: 128
-  # Частота дискретизации в Гц
   audio_sample_rate: 48000
-
-# STUN/TURN серверы для установления P2P-соединения
   ice_servers:
     - {"urls": "stun:stun.l.google.com:19302"}
     - {"urls": "stun:stun1.l.google.com:19302"}
@@ -28,12 +29,7 @@ media:
     - {"urls": "stun:stun.calls.yandex.ru:3478"}
     - {"urls": "stun:stun.mail.ru:3478"}
     - {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"}
-    # Альтернатива: для некоторых версий нужен порт 443
     - {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"}
-    
-
-
-# Внутренние порты для RTP/RTCP (аудио/видео потоков)
   rtp_port_range:
     min: 10000
     max: 20000

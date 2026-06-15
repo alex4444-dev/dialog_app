@@ -15,6 +15,8 @@ import socket
 import random
 import json
 import yaml
+import urllib.request
+from core.dht_node import DHTNode
 from typing import Dict, List, Optional, Callable
 from PyQt5.QtCore import QObject, pyqtSignal, QSettings, QStandardPaths
 from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
@@ -121,13 +123,26 @@ class P2PNetworkClient(QObject):
         self.webrtc_channels = {}      # peer_id -> RTCDataChannel
         self.webrtc_loop = None        # asyncio event loop в отдельном потоке
         self.webrtc_thread = None
+
+        # Загружаем конфиг
+        self.config = self._load_config(config_path)
         
-        # Bootstrap узлы: если переданы, используем их, иначе пустой список
+        # 2. Теперь bootstrap_nodes (если не передан, берем из конфига)
         if bootstrap_nodes is None:
-            self.bootstrap_nodes = [{"host": "localhost", "port": 8888}]   # или можно оставить localhost как запасной вариант
+            self.bootstrap_nodes = self.config.get('network', {}).get('bootstrap_nodes', [])
         else:
             self.bootstrap_nodes = bootstrap_nodes
-
+            
+        # 3. Теперь можно использовать self.config для DHT
+        dht_cfg = self.config.get('dht', {})
+        self.dht_enabled = dht_cfg.get('enabled', True)
+        self.dht_port = dht_cfg.get('port', self.listen_port + 1000)
+        dht_bootstrap = dht_cfg.get('bootstrap_nodes', self.bootstrap_nodes)
+        if self.dht_enabled:
+            self.dht = DHTNode(port=self.dht_port, bootstrap_nodes=dht_bootstrap)
+        else:
+            self.dht = None
+        
         # Система отслеживания сообщений
         self.pending_messages = {}  # message_id -> {data, timestamp, attempts, target_peer}
         self.delivered_messages = set()  # message_id подтвержденных сообщений
@@ -145,8 +160,7 @@ class P2PNetworkClient(QObject):
         self.call_requests = {}  # call_id -> call_info
         self.active_file_transfers = {}  # file_id -> transfer_info
         self.settings = QSettings('DialogApp', 'P2PClient')
-        # Загружаем конфиг
-        self.config = self._load_config(config_path)
+        
 
     def _load_config(self, config_path):
         """Загружает config.yaml из папки с приложением или из _MEIPASS (если скомпилировано)."""
@@ -164,6 +178,51 @@ class P2PNetworkClient(QObject):
             logger.error(f"Не удалось загрузить {full_path}: {e}")
             return {}
 
+    def _is_valid_ipv4(self, ip: str) -> bool:
+        """Проверяет, является ли строка корректным IPv4 адресом."""
+        parts = ip.split('.')
+        if len(parts) != 4:
+            return False
+        for part in parts:
+            try:
+                num = int(part)
+                if num < 0 or num > 255:
+                    return False
+            except ValueError:
+                return False
+        return True
+
+    def _get_external_ip(self, timeout: int = 5) -> str:
+        """
+        Определяет внешний IP-адрес машины через публичные сервисы.
+        Возвращает строку с IP, например '5.18.190.216'.
+        При ошибке возвращает локальный IP (fallback).
+        """
+        # Список сервисов для определения IP (на случай, если один недоступен)
+        services = [
+            'https://api.ipify.org',
+            'https://icanhazip.com',
+            'https://checkip.amazonaws.com',
+            'https://ifconfig.me/ip'
+        ]
+        
+        for service in services:
+            try:
+                # Используем urllib (встроенная библиотека) вместо requests
+                with urllib.request.urlopen(service, timeout=timeout) as response:
+                    ip = response.read().decode('utf-8').strip()
+                    # Простейшая валидация — проверка, что это похоже на IPv4
+                    if self._is_valid_ipv4(ip):
+                        logger.info(f"✅ Внешний IP определён: {ip} (сервис: {service})")
+                        return ip
+            except Exception as e:
+                logger.debug(f"Не удалось определить IP через {service}: {e}")
+                continue
+    
+        # Fallback: возвращаем локальный IP (как запасной вариант)
+        local_ip = self._get_local_ip()
+        logger.warning(f"⚠️ Не удалось определить внешний IP, использую локальный: {local_ip}")
+        return local_ip
 
     def _get_local_ip(self) -> str:
         """Определяет IP-адрес машины в локальной сети (не localhost)."""
@@ -178,6 +237,49 @@ class P2PNetworkClient(QObject):
             # Если не удалось определить, возвращаем localhost как запасной вариант
             return "127.0.0.1"
            
+    async def _publish_address(self):
+        """Публикует свой адрес в DHT под своим username."""
+        if not self.username:
+            logger.warning("Имя пользователя не задано, невозможно опубликовать адрес")
+            return
+        try:
+            logger.info(f"Публикация адреса для {self.username} в DHT...")
+            external_ip = self._get_external_ip()
+            key = f"user:{self.username}".encode()
+            value = f"{external_ip}:{self.listen_port}".encode()
+            logger.info(f"Попытка публикации: key={key}, value={value}")
+            await self.dht.server.set(key, value)
+            logger.info(f"✅ Опубликован адрес для {self.username}: {external_ip}:{self.listen_port}")
+        except Exception as e:
+            logger.error(f"❌ Ошибка публикации адреса в DHT: {e}", exc_info=True)
+
+    async def _find_user_address(self, username: str):
+        """Ищет адрес пользователя в DHT."""
+        key = f"user:{username}".encode()
+        try:
+            value = await self.dht.server.get(key)
+            if value:
+                host, port = value.decode().split(':')
+                logger.info(f"Найден адрес для {username}: {host}:{port}")
+                return (host, int(port))
+            else:
+                logger.debug(f"Адрес для {username} не найден в DHT")
+                return None
+        except Exception as e:
+            logger.error(f"Ошибка поиска адреса в DHT: {e}")
+            return None
+
+    def _refresh_dht_registration(self):
+        """Периодически перепубликовывает свой адрес в DHT."""
+        if not self.is_running:
+            return
+        if self.dht and self.dht.is_running:
+            loop = self.dht.loop
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._publish_address(), loop)
+        # Планируем следующее обновление через час
+        threading.Timer(3600, self._refresh_dht_registration, daemon=True).start()
+
     def connect_to_peer_media(self, call_id, peer_username):
         """Подключение к медиа другого пользователя через центральный сервер"""
         try:
@@ -297,7 +399,16 @@ class P2PNetworkClient(QObject):
             self.webrtc_loop = None
             self.webrtc_thread = threading.Thread(target=self._start_webrtc_loop, daemon=True)
             self.webrtc_thread.start()
-        
+
+            # Запускаем DHT узел
+            if self.dht_enabled and self.dht:
+                # Небольшая задержка, чтобы DHT успел запустить loop
+                time.sleep(0.5)
+                self.dht.start()
+                logger.info(f"🌐 DHT узел запущен на порту {self.dht_port}")
+                # Небольшая задержка, чтобы DHT успел инициализировать event loop
+                threading.Timer(2, self._publish_address_sync).start()
+                logger.info(f"🌐 DHT узел запущен на порту {self.dht_port}")
             logger.info(f"🚀 Клиент запущен на порту {self.listen_port}")
             self.connection_status_changed.emit("✅ Сеть запущена")
             return True
@@ -310,7 +421,12 @@ class P2PNetworkClient(QObject):
     def stop(self):
         """Остановка P2P клиента"""
         self.is_running = False
-        
+
+        # Останавливаем DHT узел
+        if self.dht_enabled and self.dht:
+            self.dht.stop()
+
+
         # Закрываем слушающий сокет, чтобы не принимать новые подключения
         if self.listener_socket:
             try:
@@ -353,6 +469,20 @@ class P2PNetworkClient(QObject):
             raise RuntimeError("WebRTC loop not running")
         future = asyncio.run_coroutine_threadsafe(coro, self.webrtc_loop)
         return future.result(timeout=10)
+
+    def _publish_address_sync(self):
+        """Синхронный вызов публикации в DHT (вызывается из таймера)."""
+        if not self.dht or not self.dht.is_running:
+            logger.warning("DHT не готов к публикации")
+            return
+        loop = self.dht.loop
+        if loop and loop.is_running():
+            logger.info("Запуск публикации адреса в DHT")
+            asyncio.run_coroutine_threadsafe(self._publish_address(), loop)
+        else:
+            logger.warning("DHT loop не активен, публикация отложена")
+            # Повторим через 2 секунды
+            threading.Timer(2, self._publish_address_sync).start()
 
     async def _create_webrtc_offer(self, peer_id: str, peer_info: dict, offer_data: dict):
         """
@@ -564,7 +694,9 @@ class P2PNetworkClient(QObject):
         with self.peers_lock:
             for peer_id in list(self.connected_peers.keys()):
                 self._send_self_info(peer_id)
-  
+
+        
+        
     def broadcast_self_info(self):
         """Разослать информацию о себе всем подключённым пирам"""
         for peer_id in list(self.connected_peers.keys()):
@@ -1113,6 +1245,7 @@ class P2PNetworkClient(QObject):
         last_auto_connect = 0
         last_user_list_update = 0
         last_message_cleanup = 0
+        last_dht_search = 0
         bootstrap_update_interval = 120  # 5 минут - обновляем bootstrap реже
         auto_connect_interval = 15
         user_list_update_interval = 15  # 15 секунд
@@ -1132,6 +1265,14 @@ class P2PNetworkClient(QObject):
                     logger.info("🔄 Периодическое обновление регистрации в bootstrap узлах...")
                     self._connect_to_bootstrap_nodes()
                     last_bootstrap_update = current_time
+                
+                # Поиск друзей через DHT (раз в минуту)
+                if current_time - last_dht_search >= 60:
+                    if self.dht and self.dht.is_running:
+                        loop = self.dht.loop
+                        if loop and loop.is_running():
+                            asyncio.run_coroutine_threadsafe(self._discover_peers_via_dht(), loop)
+                    last_dht_search = current_time
                 
                 # Обновляем список пользователей периодически
                 if current_time - last_user_list_update >= user_list_update_interval:
@@ -1720,9 +1861,42 @@ class P2PNetworkClient(QObject):
             if connected_count:
                 logger.info(f"✅ Автоматически подключено к {connected_count} пирам")
 
+            # Поиск через DHT (если есть список контактов)
+            if self.dht and self.dht.is_running:
+                loop = self.dht.loop
+                if loop and loop.is_running():
+                    future = asyncio.run_coroutine_threadsafe(self._discover_peers_via_dht(), loop)
+                    future.add_done_callback(self._on_peers_discovered)
+
         except Exception as e:
             logger.error(f"Ошибка автоматического подключения: {e}")
-        
+
+    async def _discover_peers_via_dht(self):
+        """Ищет адреса контактов из БД в DHT."""
+        # Здесь нужно получить список имён из вашей БД (например, таблица contacts)
+        # Для примера — пустой список. Замените на реальный.
+        known_usernames = self.db.get_all_contacts() if self.db else []
+        discovered = []
+        for username in known_usernames:
+            if username == self.username:
+                continue
+            addr = await self._find_user_address(username)
+            if addr:
+                host, port = addr
+                peer_key = f"{host}:{port}"
+                with self.peers_lock:
+                    if peer_key not in self.connected_peers:
+                        discovered.append((host, port))
+        return discovered
+
+    def _on_peers_discovered(self, future):
+        try:
+            discovered = future.result()
+            for host, port in discovered:
+                self._connect_to_peer(host, port)
+        except Exception as e:
+            logger.error(f"Ошибка при обработке найденных пиров: {e}")
+
     def _process_received_data(self, data: dict, peer_id: str):
         """
         Обработка полученных данных от пира.

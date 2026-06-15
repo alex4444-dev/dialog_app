@@ -135,6 +135,9 @@ class P2PMainWindow(QMainWindow):
         self.users_panel.peer_connect_requested.connect(self.connect_to_peer)
         self.users_panel.peer_disconnect_requested.connect(self.disconnect_from_peer)
         
+        self.users_panel.add_contact_requested.connect(self.add_contact)
+        self.users_panel.remove_contact_requested.connect(self.remove_contact)
+        
         self.users_panel.block_user.connect(self.block_user)
         self.users_panel.unblock_user.connect(self.unblock_user)
         
@@ -316,6 +319,8 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.start()
             self.system_chat.append("🌐 Сеть перезапущена с новыми параметрами")
 
+    
+    
     def focus_message_input(self):
         """Переключает фокус на поле ввода активной вкладки чата"""
         current_tab = self.tabs.currentWidget()
@@ -1258,6 +1263,25 @@ class P2PMainWindow(QMainWindow):
         except Exception as e:
             self.logger.error(f"Ошибка отключения от пира: {e}")
             self.system_chat.append(f"❌ Ошибка отключения: {e}")
+
+        
+
+    def add_contact(self, username: str):
+        """Добавить пользователя в список контактов"""
+        if self.db.add_contact(username):
+            self.system_chat.append(f"➕ Пользователь {username} добавлен в друзья")
+            # Запускаем поиск через DHT для этого контакта
+            if self.p2p_client and self.p2p_client.dht and self.p2p_client.dht.is_running:
+                self.p2p_client._auto_connect_to_known_peers()
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось добавить {username} в друзья")
+
+    def remove_contact(self, username: str):
+        """Удалить пользователя из списка контактов"""
+        if self.db.remove_contact(username):
+            self.system_chat.append(f"➖ Пользователь {username} удалён из друзей")
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить {username} из друзей")
 
     def setup_media_for_call(self, call_id, username):
         """Настройка медиа для звонка - критически важный метод"""

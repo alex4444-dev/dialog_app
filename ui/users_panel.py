@@ -13,6 +13,8 @@ class UsersPanel(QWidget):
     peer_disconnect_requested = pyqtSignal(str, int)  # host, port    
     block_user = pyqtSignal(str)      # username
     unblock_user = pyqtSignal(str)    # username
+    add_contact_requested = pyqtSignal(str)      # username
+    remove_contact_requested = pyqtSignal(str)   # username
     
     def __init__(self):
         super().__init__()
@@ -129,6 +131,15 @@ class UsersPanel(QWidget):
             unblock_action.triggered.connect(lambda: self.unblock_user.emit(username))
             context_menu.addAction(unblock_action)
             
+            context_menu.addSeparator()
+            add_contact_action = QAction("+ Добавить в друзья", self)
+            add_contact_action.triggered.connect(lambda: self.add_contact_requested.emit(username))
+            context_menu.addAction(add_contact_action)
+
+            remove_contact_action = QAction("- Удалить из друзей", self)
+            remove_contact_action.triggered.connect(lambda: self.remove_contact_requested.emit(username))
+            context_menu.addAction(remove_contact_action)    
+
         else:
             connect_action = QAction("🔗 Подключиться", self)
             connect_action.triggered.connect(lambda: self.peer_connect_requested.emit(host, port))
