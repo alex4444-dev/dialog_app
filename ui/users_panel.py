@@ -1,6 +1,6 @@
 from PyQt5.QtWidgets import QWidget, QVBoxLayout, QLabel, QListWidget, QPushButton, QHBoxLayout, QMenu, QAction, QListWidgetItem
 from PyQt5.QtCore import Qt, pyqtSignal
-from styles.main_style import USERS_PANEL_STYLE
+from ui.styles.main_style import USERS_PANEL_STYLE
 import logging
 
 logger = logging.getLogger('dialog_gui')
@@ -76,53 +76,49 @@ class UsersPanel(QWidget):
         self.setStyleSheet(USERS_PANEL_STYLE)
         
     def show_context_menu(self, position):
-        """Контекстное меню для пиров - улучшенная версия"""
         item = self.users_list.itemAt(position)
         if not item:
             return
-            
+
         context_menu = QMenu(self)
-        
-        # Получаем данные пира
+
         peer_id = item.data(Qt.UserRole)
         peer_data = self.peers_data.get(peer_id)
-    
         if not peer_data:
             return
-        
+
         username = peer_data['username']
+        host = peer_data['host']
+        port = peer_data['port']
         status = peer_data['status']
-    
+
         # Информация о пире
         info_action = QAction(f"Информация о {username}", self)
         info_action.triggered.connect(lambda: self.show_peer_info(peer_data))
-        
         context_menu.addAction(info_action)
         context_menu.addSeparator()
-    
-        # Действия в зависимости от статуса
-        if status == 'connected':
+
+        # Действия в зависимости от статуса (онлайн/офлайн)
+        if status == 'online':
             disconnect_action = QAction("🔌 Отключиться", self)
             disconnect_action.triggered.connect(lambda: self.peer_disconnect_requested.emit(host, port))
             context_menu.addAction(disconnect_action)
-            
-            # Действия для чата и звонков
+
             chat_action = QAction("💬 Написать сообщение", self)
-            chat_action.triggered.connect(lambda: self.user_selected.emit(username, host, port))  # ИЗМЕНЕНО!
+            chat_action.triggered.connect(lambda: self.user_selected.emit(username, host, port))
             context_menu.addAction(chat_action)
-            
+
             call_menu = context_menu.addMenu("📞 Позвонить")
-            
             audio_call_action = QAction("Аудио звонок", self)
             audio_call_action.triggered.connect(lambda: self.call_requested.emit(username, 'audio'))
             call_menu.addAction(audio_call_action)
-        
+
             video_call_action = QAction("Видео звонок", self)
             video_call_action.triggered.connect(lambda: self.call_requested.emit(username, 'video'))
             call_menu.addAction(video_call_action)
 
             context_menu.addSeparator()
-            
+
             block_action = QAction("🚫 Заблокировать", self)
             block_action.triggered.connect(lambda: self.block_user.emit(username))
             context_menu.addAction(block_action)
@@ -130,22 +126,24 @@ class UsersPanel(QWidget):
             unblock_action = QAction("🔓 Разблокировать", self)
             unblock_action.triggered.connect(lambda: self.unblock_user.emit(username))
             context_menu.addAction(unblock_action)
-            
-            context_menu.addSeparator()
-            add_contact_action = QAction("+ Добавить в друзья", self)
-            add_contact_action.triggered.connect(lambda: self.add_contact_requested.emit(username))
-            context_menu.addAction(add_contact_action)
-
-            remove_contact_action = QAction("- Удалить из друзей", self)
-            remove_contact_action.triggered.connect(lambda: self.remove_contact_requested.emit(username))
-            context_menu.addAction(remove_contact_action)    
 
         else:
-            connect_action = QAction("🔗 Подключиться", self)
-            connect_action.triggered.connect(lambda: self.peer_connect_requested.emit(host, port))
-            context_menu.addAction(connect_action)
-        
-        # Показываем меню
+            # Для офлайн-пользователей – только подключиться (если известен адрес)
+            if host != 'unknown' and port != 0:
+                connect_action = QAction("🔗 Подключиться", self)
+                connect_action.triggered.connect(lambda: self.peer_connect_requested.emit(host, port))
+                context_menu.addAction(connect_action)
+
+        # Действия с контактами (доступны для всех, даже офлайн)
+        context_menu.addSeparator()
+        add_contact_action = QAction("➕ Добавить в контакты", self)
+        add_contact_action.triggered.connect(lambda: self.add_contact_requested.emit(username))
+        context_menu.addAction(add_contact_action)
+
+        remove_contact_action = QAction("➖ Удалить из контактов", self)
+        remove_contact_action.triggered.connect(lambda: self.remove_contact_requested.emit(username))
+        context_menu.addAction(remove_contact_action)
+
         context_menu.exec_(self.users_list.mapToGlobal(position))
 
     def show_peer_info(self, peer_data):
@@ -254,103 +252,93 @@ class UsersPanel(QWidget):
                 border-radius: 4px;
             """)
         
-    def update_users(self, users):
-        """Обновление списка пользователей - исправленная версия"""
-        self.debug_show_received_data(users)
-        try:
-            self.users_list.clear()
-            self.peers_data.clear()
-        
-            if not users:
-                logger.debug("Получен пустой список пользователей")
-                self.update_network_status(False, 0)
-                return
-                
-            logger.info(f"Обновление списка пользователей: получено {len(users)} записей")
-            
-            connected_count = 0
-            processed_peers = set()  # Для отслеживания дубликатов
-            
-            for user in users:
-                try:
-                    if isinstance(user, dict):
-                        username = user.get('username', 'Неизвестный')
-                        host = user.get('host', 'unknown')
-                        port = user.get('port', 0)
-                        
-                        # Создаем уникальный идентификатор пира
-                        peer_id = f"{host}:{port}"
-                        
-                        # Пропускаем дубликаты
-                        if peer_id in processed_peers:
-                            logger.warning(f"Пропущен дубликат: {username} ({host}:{port})")
-                            continue
-                            
-                        processed_peers.add(peer_id)
-                        
-                        # Определяем статус
-                        status = user.get('status', 'unknown')
-                        if status == 'connected':
-                            connected_count += 1
-                        
-                        # Сохраняем данные пира
-                        self.peers_data[peer_id] = {
-                            'username': username,
-                            'host': host,
-                            'port': port,
-                            'status': status
-                        }
-                        
-                        # Создаем отображаемый текст
-                        status_icon = "🟢" if status == 'connected' else "🟡"
-                        item_text = f"{status_icon} {username}"
-                        
-                        # Добавляем тип, если есть
-                        user_type = user.get('type')
-                        if user_type:
-                            item_text += f" [{user_type}]"
-                        
-                        # СОЗДАЕМ QListWidgetItem ПРАВИЛЬНО
-                        item = QListWidgetItem(item_text)
-                        item.setData(Qt.UserRole, peer_id)
-                        self.users_list.addItem(item)
-                        
-                        logger.debug(f"Добавлен пользователь: {username} - {status}")
-                        
-                    elif isinstance(user, str):
-                        # Для обратной совместимости - создаем уникальный ID
-                        clean_username = user.replace("👤 ", "").replace("💬 ", "")
-                        peer_id = f"legacy_{clean_username}_{len(processed_peers)}"
-                        
-                        if peer_id in processed_peers:
-                            continue
-                            
-                        processed_peers.add(peer_id)
-                        
-                        self.peers_data[peer_id] = {
-                            'username': clean_username,
-                            'host': 'unknown',
-                            'port': 0,
-                            'status': 'connected'
-                        }
-                        
-                        item = QListWidgetItem(f"👤 {clean_username}")
-                        item.setData(Qt.UserRole, peer_id)
-                        self.users_list.addItem(item)
-                        
-                        connected_count += 1
-                        logger.debug(f"Добавлен пользователь (устаревший формат): {clean_username}")
-                
-                except Exception as e:
-                    logger.error(f"Ошибка обработки пользователя {user}: {e}")
-                    continue
-        
-            # Обновляем статус сети
-            self.update_network_status(connected_count > 0, connected_count)
-            logger.info(f"Обновлено: {len(self.peers_data)} пользователей, {connected_count} подключено")
-        
-        except Exception as e:
-            logger.error(f"Критическая ошибка обновления списка пользователей: {e}")
-            # В случае ошибки очищаем список
-            self.users_list.clear()
+    def update_users(self, users, contacts=None):
+        """
+        Обновление списка пользователей с учётом контактов (друзей).
+        :param users: список онлайн-пользователей (словари)
+        :param contacts: список имён друзей из БД (если None, берём из self.contacts)
+        """
+        # Если контакты не переданы, пытаемся получить через главное окно (если есть доступ)
+        if contacts is None:
+            if self.parent() and hasattr(self.parent(), 'get_contacts'):
+                contacts = self.parent().get_contacts()
+            else:
+                contacts = []
+
+        # Создаём множество имён онлайн-пользователей для быстрого поиска
+        online_usernames = {u['username'] for u in users if isinstance(u, dict) and 'username' in u}
+
+        # Строим словарь всех пользователей (онлайн + офлайн друзья)
+        all_users = []
+        processed = set()
+
+        # Добавляем онлайн-пользователей
+        for user in users:
+            username = user.get('username')
+            if username and username not in processed:
+                user['status'] = 'online'
+                user['is_contact'] = username in contacts
+                all_users.append(user)
+                processed.add(username)
+
+        # Добавляем офлайн-друзей, которых нет в онлайн-списке
+        for contact in contacts:
+            if contact not in processed:
+                all_users.append({
+                    'username': contact,
+                    'host': 'unknown',
+                    'port': 0,
+                    'status': 'offline',
+                    'is_contact': True,
+                    'online': False
+                })
+                processed.add(contact)
+
+        # Теперь обновляем UI с объединённым списком
+        self._update_list(all_users)
+
+    def _update_list(self, users):
+        """Обновление QListWidget на основе подготовленного списка"""
+        self.users_list.clear()
+        self.peers_data.clear()
+
+        if not users:
             self.update_network_status(False, 0)
+            return
+
+        connected_count = 0
+        for user in users:
+            username = user.get('username', 'Неизвестный')
+            host = user.get('host', 'unknown')
+            port = user.get('port', 0)
+            status = user.get('status', 'offline')
+            is_contact = user.get('is_contact', False)
+
+            peer_id = f"{host}:{port}" if host != 'unknown' else f"offline_{username}"
+
+            # Сохраняем данные
+            self.peers_data[peer_id] = {
+                'username': username,
+                'host': host,
+                'port': port,
+                'status': status,
+                'is_contact': is_contact
+            }
+
+            # Определяем иконку статуса
+            if status == 'online':
+                status_icon = "🟢"
+                connected_count += 1
+            else:
+                status_icon = "⚪"  # серый кружок для офлайн
+
+            # Формируем текст: добавляем звёздочку для друзей
+            friend_icon = "👥 " if is_contact else ""
+            item_text = f"{status_icon} {friend_icon}{username}"
+
+            item = QListWidgetItem(item_text)
+            item.setData(Qt.UserRole, peer_id)
+            self.users_list.addItem(item)
+
+        self.update_network_status(connected_count > 0, connected_count)
+        logger.info(f"Обновлено: {len(users)} пользователей (онлайн: {connected_count}, друзей: {sum(1 for u in users if u.get('is_contact'))})")

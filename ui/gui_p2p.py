@@ -10,9 +10,9 @@ from typing import List, Dict, Tuple
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
                              QMessageBox, QStatusBar, QTextEdit, QDialog, QFileDialog,
-                             QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings
-from PyQt5.QtGui import QIcon, QKeySequence
+                             QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut, QLabel, QPushButton)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings, QUrl
+from PyQt5.QtGui import QIcon, QKeySequence, QDesktopServices
 
 # Добавляем путь к текущей директории для импорта модулей
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,15 +21,15 @@ if current_dir not in sys.path:
 
 try:
     from network.p2p_network import P2PNetworkClient
-    from auth_window import AuthWindow
-    from users_panel import UsersPanel
-    from chat_window import ChatWindow
-    from notifications import NotificationWindow
-    from settings_window import SettingsDialog
-    from call_window import CallWindow
-    from video_window import VideoCallWindow
+    from ui.auth_window import AuthWindow
+    from ui.users_panel import UsersPanel
+    from ui.chat_window import ChatWindow
+    from ui.notifications import NotificationWindow
+    from ui.settings_window import SettingsDialog
+    from ui.call_window import CallWindow
+    from ui.video_window import VideoCallWindow
     from storage.database import ClientDatabase
-    from sound_manager import SoundManager
+    from ui.sound_manager import SoundManager
     from core.auth_manager import AuthManager
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
@@ -398,7 +398,7 @@ class P2PMainWindow(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = QSystemTrayIcon(self)
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            self.tray_icon.setToolTip("Диалог - P2P Мессенджер")
+            self.tray_icon.setToolTip("Диалог - Коммуникационная платформа")
             
             # Создаем контекстное меню для трея
             tray_menu = QMenu()
@@ -498,6 +498,12 @@ class P2PMainWindow(QMainWindow):
         profile_action = QAction('👤 Мой профиль', self)
         profile_action.triggered.connect(self.show_profile)
         account_menu.addAction(profile_action)
+
+        # Меню 'О программе'
+        about_menu = menubar.addMenu('Справка')
+        about_action = QAction('ℹ️ О программе', self)
+        about_action.triggered.connect(self.show_about_dialog)
+        about_menu.addAction(about_action)
 
     def setup_p2p_integration(self):
         """Интеграция с P2P сетью - безопасная версия"""
@@ -746,6 +752,7 @@ class P2PMainWindow(QMainWindow):
         logger.info(f"MainWindow.handle_call: Обработка звонка: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
 
         if action == 'incoming_call':
+            self.add_system_message_to_chat(from_user, f"📞 Входящий {call_type} звонок...")
             if call_type == 'video':
                 self.handle_incoming_video_call(from_user, call_id)
             else:
@@ -756,12 +763,15 @@ class P2PMainWindow(QMainWindow):
             logger.debug(f"Игнорируем outgoing_call для {call_id}")
                 
         elif action == 'call_accepted':
+            self.add_system_message_to_chat(from_user, f"✅ Звонок принят")
             self.handle_call_accepted(from_user, call_id)
             
         elif action == 'call_rejected':
+            self.add_system_message_to_chat(from_user, f"❌ Звонок отклонён")
             self.handle_call_rejected(from_user, call_id)
             
         elif action == 'call_ended':
+            self.add_system_message_to_chat(from_user, f"📞 Звонок завершён")
             self.handle_call_ended(from_user, call_id)
 
         elif action == 'media_info':
@@ -842,7 +852,24 @@ class P2PMainWindow(QMainWindow):
             messages = self.db.get_user_messages(self.username, clean_username, limit=200)
             for msg in messages:
                 is_own = (msg['from_user'] == self.username)
-                chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own)
+                if msg['from_user'] == 'system':
+                    # Это системное сообщение
+                    # Проверяем, содержит ли оно маркер файла
+                    if msg['message'].startswith("📥 Получен файл:") or msg['message'].startswith("📤 Отправлен файл:"):
+                        # Извлекаем имя файла из сообщения (можно парсить)
+                        # Проще: хранить отдельно путь, но для простоты используем регулярку
+                        import re
+                        match = re.search(r'файл:\s*([^)]+)', msg['message'])
+                        if match:
+                            file_name = match.group(1).strip()
+                            # Путь не хранится в сообщении, поэтому ссылку не сделаем, просто покажем текст
+                            chat_window.add_system_message(msg['message'])
+                        else:
+                            chat_window.add_system_message(msg['message'])
+                    else:
+                        chat_window.add_system_message(msg['message'])
+                else:
+                    chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own)
                 
             # Подключаем сигналы
             chat_window.message_sent.connect(self.on_message_sent)
@@ -1151,7 +1178,8 @@ class P2PMainWindow(QMainWindow):
     
             # Обновляем панель пользователей
             if hasattr(self, 'users_panel'):
-                self.users_panel.update_users(peers_data)
+                contacts = self.get_contacts()
+                self.users_panel.update_users(peers_data, contacts)
     
             # Обновляем статус сети
             connected_count = len([p for p in peers_data if p.get('status') == 'connected'])
@@ -1264,7 +1292,11 @@ class P2PMainWindow(QMainWindow):
             self.logger.error(f"Ошибка отключения от пира: {e}")
             self.system_chat.append(f"❌ Ошибка отключения: {e}")
 
-        
+    def get_contacts(self):
+        """Возвращает список имён контактов из БД"""
+        if self.db:
+            return self.db.get_all_contacts()
+        return []    
 
     def add_contact(self, username: str):
         """Добавить пользователя в список контактов"""
@@ -1780,18 +1812,42 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.file_received.connect(self.on_file_received)
 
     def on_file_sent(self, username, file_path):
-        """Вызывается, когда пользователь выбрал файл в окне чата"""
         if self.p2p_client:
+            if username in self.chat_windows:
+                chat_window = self.chat_windows[username]
+                file_name = os.path.basename(file_path)
+                chat_window.add_file_notification(file_name, file_path, is_sent=True)
             self.p2p_client.send_file(username, file_path)
         else:
-            QMessageBox.warning(self, "Ошибка", "P2P клиент не инициализирован")
+            QMessageBox.warning(self, "Ошибка", "Клиент не инициализирован")
 
     def on_file_received(self, from_user, save_path):
-        """Обработка получения файла от другого пользователя"""
         self.sound_manager.play('file_received')
         self.system_chat.append(f"📁 Получен файл от {from_user}: {os.path.basename(save_path)}")
+        
+        # Открываем чат, если он ещё не открыт
+        if from_user not in self.chat_windows:
+            self.open_chat(from_user)
+            # После открытия чата добавляем уведомление о файле (оно добавится в историю)
+        
+        # Теперь чат гарантированно открыт, добавляем уведомление
+        if from_user in self.chat_windows:
+            chat_window = self.chat_windows[from_user]
+            file_name = os.path.basename(save_path)
+            abs_path = os.path.abspath(save_path)
+            chat_window.add_file_notification(file_name, abs_path, is_sent=False)
+        
         self.show_notification("Файл получен", f"От {from_user}: {os.path.basename(save_path)}")
-    
+
+    def add_system_message_to_chat(self, username, message):
+        """Добавляет системное сообщение в чат с пользователем, если он открыт"""
+        if username in self.chat_windows:
+            chat_window = self.chat_windows[username]
+            chat_window.add_system_message(message)
+        else:
+            # Можно также добавить в системный лог, но не обязательно
+            self.system_chat.append(f"📢 {username}: {message}")
+
     def show_initial_network_info(self):
         """Показать начальную информацию о сети"""
         network_info = self.get_network_info()
@@ -2251,6 +2307,54 @@ class P2PMainWindow(QMainWindow):
             self.disconnect_from_network()
             self.close()
     
+    def show_about_dialog(self):
+        """Показать диалог с информацией о программе"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("О программе")
+        dialog.setFixedSize(450, 350)
+        layout = QVBoxLayout(dialog)
+
+        # Основная информация
+        info = QLabel(
+            "<b>💬 ДИАЛОГ</b> – Коммуникационная платформа<br><br>"
+            "<b>Версия:</b> 1.0.0<br>"
+            "<b>Описание:</b> Программа для общения с людьми в сети интернет, \n используя аудио/видео звонки и текстовые сообщения<br>"
+            "<b>Автор:</b> Алексей Григорьев<br>"
+            "<b>Год выпуска:</b> 2026<br><br>"
+            "<b>Лицензия:</b> GNU GPL v3"
+        )
+        info.setAlignment(Qt.AlignLeft)
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 16px; padding: 10px;")
+        layout.addWidget(info)
+
+        # Кнопка открытия лицензии
+        license_btn = QPushButton("📄 Лицензионное соглашение")
+        license_btn.clicked.connect(self.open_license)
+        layout.addWidget(license_btn, alignment=Qt.AlignCenter)
+
+        dialog.exec_()
+
+    def open_license(self):
+        """Открыть файл LICENSE в системном редакторе"""
+        # Определяем базовую директорию (как в main.py)
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        license_path = os.path.join(base_dir, 'LICENSE')
+
+        if os.path.exists(license_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(license_path))
+        else:
+            QMessageBox.warning(
+                self,
+                "Файл не найден",
+                "Файл LICENSE не найден в папке приложения.\n"
+                "Пожалуйста, убедитесь, что он присутствует."
+            )
+
     def closeEvent(self, event):
         """Обработчик закрытия окна"""
         self.disconnect_from_network()

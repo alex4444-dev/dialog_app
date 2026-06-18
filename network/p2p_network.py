@@ -40,31 +40,30 @@ import logging.handlers
 
 # Настройка улучшенного логирования
 def setup_advanced_logging():
+    
+    # Определяем базовую директорию
+    if getattr(sys, 'frozen', False):
+        base_dir = os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    log_dir = os.path.join(base_dir, 'logs')
+    os.makedirs(log_dir, exist_ok=True)
+
     logger = logging.getLogger('dialog_p2p')
     logger.setLevel(logging.DEBUG)
-    
-    # Форматтер
-    formatter = logging.Formatter(
-        '%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
-    )
-    
-    # Консольный handler
+    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s')
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
-    
-    # File handler с ротацией
     file_handler = logging.handlers.RotatingFileHandler(
-        './logs/p2p_network.log', 
-        maxBytes=10*1024*1024,  # 10MB
+        os.path.join(log_dir, 'p2p_network.log'),
+        maxBytes=10*1024*1024,
         backupCount=5
     )
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(formatter)
-    
     logger.addHandler(console_handler)
     logger.addHandler(file_handler)
-    
     return logger
 
 # Инициализация логирования

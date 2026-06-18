@@ -3,7 +3,7 @@ from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QLabel, QLineEdit,
                              QPushButton, QHBoxLayout, QFormLayout, 
                              QMessageBox, QApplication)
 from PyQt5.QtCore import Qt, pyqtSignal
-from styles.auth_style import AUTH_DIALOG_STYLE, REGISTER_STYLE_EXTRA, LOGIN_STYLE_EXTRA
+from ui.styles.auth_style import AUTH_DIALOG_STYLE, REGISTER_STYLE_EXTRA, LOGIN_STYLE_EXTRA
 import logging
 
 logger = logging.getLogger('dialog_gui')

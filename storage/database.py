@@ -81,13 +81,6 @@ class ClientDatabase:
                     added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
             ''')
-
-            conn.execute('''
-                CREATE TABLE IF NOT EXISTS contacts (
-                    contact_username TEXT PRIMARY KEY,
-                    added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                )
-            ''')    
             conn.commit()
         finally:
             conn.close()
@@ -241,7 +234,19 @@ class ClientDatabase:
         except:
             return False
 
-    
+    def store_system_message(self, to_user: str, message: str, message_id: str = None):
+        """Сохранение системного сообщения в чат с пользователем"""
+        if not message_id:
+            message_id = f"system_{to_user}_{time.time()}"
+        conn = self._get_connection()
+        try:
+            conn.execute(
+                'INSERT INTO messages (from_user, to_user, message, message_id) VALUES (?, ?, ?, ?)',
+                ('system', to_user, message, message_id)
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def add_contact(self, username: str) -> bool:
         """Добавить пользователя в список контактов"""

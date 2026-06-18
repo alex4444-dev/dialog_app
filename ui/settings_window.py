@@ -831,9 +831,9 @@ class VideoSettingsPage(QWidget):
             return
 
         try:
-            from video_window import VideoCaptureThread, VideoProcessor
+            from ui.video_window import VideoCaptureThread, VideoProcessor
         except ImportError:
-            from .video_window import VideoCaptureThread, VideoProcessor
+            from ui.video_window import VideoCaptureThread, VideoProcessor
 
         # Получаем текущие настройки
         res_data = self.resolution_combo.currentData()
