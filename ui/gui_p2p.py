@@ -1253,41 +1253,36 @@ class P2PMainWindow(QMainWindow):
             return {'status': f'Error: {e}'}
   
     def connect_to_peer(self, host: str, port: int):
-        """Подключиться к пиру"""
+        """Подключиться к пиру вручную"""
         try:
             self.logger.info(f"Подключение к пиру {host}:{port}")
-        
-            # Используем метод P2PNetwork для подключения
-            if hasattr(self.p2p_client, 'network') and hasattr(self.p2p_client.network, 'connect_to_peer'):
-                success = self.p2p_client.network.connect_to_peer_sync(host, port)
-                if success:
-                    self.logger.info(f"✅ Подключение к {host}:{port} выполнено")
-                    # Обновляем список пиров через короткое время
-                    QTimer.singleShot(1000, self.update_peers_from_p2p)
-                else:
-                    self.logger.error(f"❌ Не удалось подключиться к {host}:{port}")
+            # Используем прямой метод P2PNetworkClient
+            if hasattr(self.p2p_client, '_connect_to_peer'):
+                # Запускаем в отдельном потоке, чтобы не блокировать GUI
+                threading.Thread(
+                    target=self.p2p_client._connect_to_peer,
+                    args=(host, port),
+                    daemon=True
+                ).start()
+                self.system_chat.append(f"🔗 Попытка подключения к {host}:{port}...")
             else:
-                self.logger.error(f"⚠️ Метод подключения к пирам не доступен")
-            
+                self.logger.error("❌ Метод _connect_to_peer не найден")
+                self.system_chat.append("❌ Ошибка: метод подключения не доступен")
         except Exception as e:
             self.logger.error(f"Ошибка подключения к пиру: {e}")
-            self.system_chat.append(f"❌ Ошибка подключения к сети: {e}")
-  
+            self.system_chat.append(f"❌ Ошибка подключения: {e}")
+
     def disconnect_from_peer(self, host: str, port: int):
         """Отключиться от пира"""
         try:
             self.logger.info(f"Отключение от пира {host}:{port}")
-        
-            if hasattr(self.p2p_client, 'network') and hasattr(self.p2p_client.network, 'disconnect_from_peer'):
-                success = self.p2p_client.network.disconnect_from_peer_sync(host, port)
-                if success:
-                    self.system_chat.append(f"✅ Отключение от {host}:{port} выполнено")
-                    self.update_peers_from_p2p()
-                else:
-                    self.system_chat.append(f"❌ Не удалось отключиться от {host}:{port}")
+            # Ищем пира в connected_peers и закрываем сокет
+            peer_key = f"{host}:{port}"
+            if peer_key in self.p2p_client.connected_peers:
+                self.p2p_client._handle_peer_disconnection(peer_key)
+                self.system_chat.append(f"✅ Отключение от {host}:{port} выполнено")
             else:
-                self.system_chat.append(f"⚠️ Метод отключения от пиров не доступен")
-            
+                self.system_chat.append(f"⚠️ Пир {host}:{port} не найден в подключенных")
         except Exception as e:
             self.logger.error(f"Ошибка отключения от пира: {e}")
             self.system_chat.append(f"❌ Ошибка отключения: {e}")
