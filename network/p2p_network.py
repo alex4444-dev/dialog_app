@@ -14,6 +14,7 @@ import logging.handlers
 import socket
 import random
 import json
+import miniupnpc
 import yaml
 import urllib.request
 from core.dht_node import DHTNode
@@ -27,6 +28,7 @@ root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if root_dir not in sys.path:
     sys.path.insert(0, root_dir)
 try:
+    from network.port_forwarding import open_port
     from core.crypto import CryptoManager
     from core.secure_channel import SecureChannel
 except ImportError as e:
@@ -121,7 +123,15 @@ class P2PNetworkClient(QObject):
         self.webrtc_connections = {}  # peer_id -> RTCPeerConnection
         self.webrtc_channels = {}      # peer_id -> RTCDataChannel
         self.webrtc_loop = None        # asyncio event loop в отдельном потоке
+        self._forwarded_ports = {}  # port -> (upnp_obj, protocol)
         self.webrtc_thread = None
+        self.bootstrap_host = None
+        self.bootstrap_port = None
+        self.signal_poll_interval = 2  # секунды
+        self.signal_thread = None
+        self.signal_running = False
+        # Очередь сообщений, ожидающих отправки после установки WebRTC
+        self.pending_webrtc_messages = {}  # username -> list of (msg_data, msg_id)
 
         # Загружаем конфиг
         self.config = self._load_config(config_path)
@@ -277,7 +287,9 @@ class P2PNetworkClient(QObject):
             if loop and loop.is_running():
                 asyncio.run_coroutine_threadsafe(self._publish_address(), loop)
         # Планируем следующее обновление через час
-        threading.Timer(3600, self._refresh_dht_registration, daemon=True).start()
+        timer = threading.Timer(3600, self._refresh_dht_registration)
+        timer.daemon = True
+        timer.start()
 
     def connect_to_peer_media(self, call_id, peer_username):
         """Подключение к медиа другого пользователя через центральный сервер"""
@@ -354,6 +366,38 @@ class P2PNetworkClient(QObject):
                 logger.error(f"Ошибка в цикле повторной отправки: {e}")
                 time.sleep(5)
     
+    def _forward_port(self, port: int, protocol: str = 'TCP') -> bool:
+        """
+        Пытается открыть порт через UPnP.
+        Возвращает True, если проброс успешен, иначе False.
+        Сохраняет информацию о пробросе для последующего закрытия.
+        """
+        if miniupnpc is None:
+            logger.warning("UPnP недоступен, проброс порта {} невозможен".format(port))
+            return False
+
+        try:
+            upnp = miniupnpc.UPnP()
+            upnp.discover()
+            upnp.selectigd()
+            local_ip = upnp.lanaddr
+            # Добавляем правило проброса
+            result = upnp.addportmapping(port, protocol, local_ip, port, f'DialogApp-{port}', '')
+            if result:
+                external_ip = upnp.externalipaddress()
+                logger.info(f"✅ Порт {port} ({protocol}) успешно проброшен! Внешний IP: {external_ip}")
+                # Сохраняем объект upnp и порт для последующего удаления
+                if not hasattr(self, '_forwarded_ports'):
+                    self._forwarded_ports = {}
+                self._forwarded_ports[port] = (upnp, protocol)  # сохраняем, чтобы потом закрыть
+                return True
+            else:
+                logger.warning(f"❌ Не удалось пробросить порт {port} через UPnP")
+                return False
+        except Exception as e:
+            logger.error(f"Ошибка при пробросе порта {port}: {e}")
+            return False
+    
     def start(self) -> bool:
         """Упрощенный запуск P2P клиента"""
         try:
@@ -368,7 +412,7 @@ class P2PNetworkClient(QObject):
                     self.listener_socket.listen(5)
                     self.listener_socket.settimeout(1.0)
                     self.listen_port = port
-                    logger.info(f"✅ Успешно привязан к порту {port}")
+                    logger.info(f"✅ Успешно привязан к порту {port}")             
                     break
                 except OSError as e:
                     if e.errno == 98:  # Address already in use
@@ -379,12 +423,28 @@ class P2PNetworkClient(QObject):
             else:
                 logger.error("❌ Не удалось найти свободный порт в диапазоне 9000-9100")
                 return False
-        
+
+            # ---- АВТОМАТИЧЕСКИЙ ПРОБРОС ОСНОВНОГО ПОРТА (TCP) ----
+            if self.config.get('network', {}).get('upnp_enabled', True):
+                self._forward_port(self.listen_port, 'TCP')
+            # ----------------------------------------------------
+            
             # Загружаем известные пиры
             self._load_known_peers()
         
             # Подключаемся к bootstrap узлам
             self._connect_to_bootstrap_nodes()
+
+            # После self._connect_to_bootstrap_nodes()
+            if self.bootstrap_nodes:
+                node = self.bootstrap_nodes[0]
+                self.bootstrap_host = node['host']
+                self.bootstrap_port = node['port']
+                self.signal_running = True
+                self.signal_thread = threading.Thread(target=self._signal_poll_loop, daemon=True)
+                self.signal_thread.start()
+                # Периодическое обнаружение пиров через bootstrap
+                threading.Timer(10, self._discover_and_connect_peers_via_bootstrap).start()
 
             # ЗАПУСКАЕМ ПОТОК ДЛЯ ПРИНЯТИЯ ВХОДЯЩИХ СОЕДИНЕНИЙ
             self.accept_thread = threading.Thread(target=self._accept_connections, daemon=True)
@@ -405,9 +465,11 @@ class P2PNetworkClient(QObject):
                 time.sleep(0.5)
                 self.dht.start()
                 logger.info(f"🌐 DHT узел запущен на порту {self.dht_port}")
-                # Небольшая задержка, чтобы DHT успел инициализировать event loop
+
+                # Проброс UDP-порта для DHT (если включён в конфиге)
+                if self.config.get('network', {}).get('upnp_enabled', True):
+                    self._forward_port(self.dht_port, 'UDP')
                 threading.Timer(2, self._publish_address_sync).start()
-                logger.info(f"🌐 DHT узел запущен на порту {self.dht_port}")
             logger.info(f"🚀 Клиент запущен на порту {self.listen_port}")
             self.connection_status_changed.emit("✅ Сеть запущена")
             return True
@@ -418,42 +480,52 @@ class P2PNetworkClient(QObject):
             return False
 
     def stop(self):
-        """Остановка P2P клиента"""
         self.is_running = False
+        self.signal_running = False
+        if self.signal_thread:
+            self.signal_thread.join(timeout=1)
+            
 
-        # Останавливаем DHT узел
         if self.dht_enabled and self.dht:
             self.dht.stop()
 
-
-        # Закрываем слушающий сокет, чтобы не принимать новые подключения
         if self.listener_socket:
             try:
                 self.listener_socket.close()
             except:
                 pass
 
-        # Отправляем уведомление о выходе всем пирам (используем копию ключей)
         offline_msg = {'type': 'user_offline', 'username': self.username}
-        
-        # Итерируемся по копии списка ключей, чтобы избежать изменения словаря во время итерации
         for peer_id in list(self.connected_peers.keys()):
             peer_info = self.connected_peers.get(peer_id)
             if peer_info:
-                # Пытаемся отправить сообщение, но игнорируем ошибки (пир уже мог отключиться)
                 self._send_to_peer(peer_info, offline_msg)
-                # Закрываем сокет пира
                 try:
                     peer_info['socket'].close()
                 except:
                     pass
-    
-        # Очищаем словарь подключённых пиров
+
         self.connected_peers.clear()
-        
-        # Сохраняем известные пиры в БД (если нужно)
         self._save_known_peers()
-        
+
+        # Закрываем проброшенные порты с обработкой NoSuchEntryInArray
+        if hasattr(self, '_forwarded_ports'):
+            for port, value in list(self._forwarded_ports.items()):
+                if isinstance(value, tuple) and len(value) == 2:
+                    upnp_obj, protocol = value
+                else:
+                    upnp_obj = value
+                    protocol = 'TCP'
+                try:
+                    upnp_obj.deleteportmapping(port, protocol)
+                    logger.info(f"🔒 Проброс порта {port} ({protocol}) закрыт")
+                except Exception as e:
+                    if "NoSuchEntryInArray" in str(e):
+                        logger.debug(f"Проброс порта {port} уже отсутствует на роутере")
+                    else:
+                        logger.warning(f"Не удалось закрыть проброс порта {port}: {e}")
+            self._forwarded_ports.clear()
+
         logger.info("P2P клиент остановлен")
 
     def _start_webrtc_loop(self):
@@ -646,46 +718,7 @@ class P2PNetworkClient(QObject):
             logger.error(f"❌ Ошибка прямого подключения: {e}")
             return False
         
-    def register_with_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
-        """Синхронная регистрация в bootstrap сервере"""
-        try:
-            import socket
-            import json
-        
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(10.0)
-            sock.connect((bootstrap_host, bootstrap_port))
-        
-            registration_message = {
-                'type': 'register',
-                'port': self.listen_port
-            }
-        
-            sock.send(json.dumps(registration_message).encode())
-        
-            # Читаем ответ
-            data = sock.recv(1024)
-            if data:
-                response = json.loads(data.decode())
-                if response.get('type') == 'registration_success':
-                    logger.info(f"✅ Успешная регистрация в bootstrap сервере")
-                    # Добавляем полученных пиров в known_peers
-                    for peer_host, peer_port in response.get('peers', []):
-                        if (peer_host, peer_port) != (bootstrap_host, bootstrap_port):
-                            if not any(p.get('host') == peer_host and p.get('port') == peer_port for p in self.known_peers):
-                                self.known_peers.append({
-                                    'host': peer_host, 
-                                    'port': peer_port,
-                                    'discovered_at': time.time(),
-                                    'source': 'bootstrap'
-                                })
-                                logger.info(f"📥 Добавлен пир {peer_host}:{peer_port}")
-        
-            sock.close()
-        
-        except Exception as e:
-            logger.warning(f"❌ Не удалось зарегистрироваться в bootstrap сервере: {e}")
-
+    
     def set_username(self, username: str):
         """Установка имени пользователя (вызывается после логина)"""
         self.username = username
@@ -694,7 +727,14 @@ class P2PNetworkClient(QObject):
             for peer_id in list(self.connected_peers.keys()):
                 self._send_self_info(peer_id)
 
-        
+            if self.dht and self.dht.is_running:
+                loop = self.dht.loop
+                if loop and loop.is_running():
+                    asyncio.run_coroutine_threadsafe(self._publish_address(), loop)
+                    timer = threading.Timer(5, self._refresh_dht_registration)
+                    timer.daemon = True
+                    timer.start()
+            
         
     def broadcast_self_info(self):
         """Разослать информацию о себе всем подключённым пирам"""
@@ -779,43 +819,49 @@ class P2PNetworkClient(QObject):
         else:
             logger.error(f"Пир {peer_id} не найден для отправки answer")
     
-    def get_peers_from_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
-        """Синхронное получение списка пиров от bootstrap сервера"""
+    def register_with_bootstrap_sync(self, bootstrap_host: str, bootstrap_port: int):
+        """Синхронная регистрация в bootstrap сервере"""
         try:
             import socket
             import json
-        
+
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
             sock.connect((bootstrap_host, bootstrap_port))
-        
-            request_message = {
-                'type': 'get_peers'
+
+            registration_message = {
+                'type': 'register',
+                'port': self.listen_port,
+                'username': self.username
             }
-        
-            sock.send(json.dumps(request_message).encode())
-        
+            sock.send(json.dumps(registration_message).encode() + b'\n')
+
             data = sock.recv(1024)
             if data:
                 response = json.loads(data.decode())
-                if response.get('type') == 'peer_list':
-                    for peer_host, peer_port in response.get('peers', []):
-                        if not any(p.get('host') == peer_host and p.get('port') == peer_port for p in self.known_peers):
-                            self.known_peers.append({
-                                'host': peer_host,
-                                'port': peer_port,
-                                'discovered_at': time.time(),
-                                'source': 'bootstrap'
-                            })
-                            logger.info(f"📥 Получен пир {peer_host}:{peer_port} от bootstrap")
-                
-                    logger.info(f"📥 Всего получено {len(response.get('peers', []))} пиров от bootstrap сервера")
-        
+                if response.get('type') == 'registration_success':
+                    logger.info(f"✅ Успешная регистрация в bootstrap сервере")
+                    for peer_info in response.get('peers', []):
+                        peer_host = peer_info.get('host')
+                        peer_port = peer_info.get('port')
+                        if not peer_host or not peer_port:
+                            continue
+                        if (peer_host, peer_port) != (bootstrap_host, bootstrap_port):
+                            if not any(p.get('host') == peer_host and p.get('port') == peer_port for p in self.known_peers):
+                                self.known_peers.append({
+                                    'host': peer_host,
+                                    'port': peer_port,
+                                    'discovered_at': time.time(),
+                                    'source': 'bootstrap',
+                                    'username': peer_info.get('username')
+                                })
+                                logger.info(f"📥 Добавлен пир {peer_host}:{peer_port} (username: {peer_info.get('username')})")
             sock.close()
-        
+
         except Exception as e:
-            logger.warning(f"❌ Не удалось получить пиров от bootstrap сервера: {e}")
-    
+            logger.warning(f"❌ Не удалось зарегистрироваться в bootstrap сервере: {e}")
+
+
     def connect_to_all_known_peers(self):
         """Подключиться ко всем известным пирам (для тестирования)"""
         logger.info("🔗 Ручное подключение ко всем известным пирам")
@@ -1200,40 +1246,40 @@ class P2PNetworkClient(QObject):
             sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             sock.settimeout(10.0)
             sock.connect((host, port))
-            
-            # Регистрация
+
             registration_message = {
                 'type': 'register',
                 'port': self.listen_port,
-                'username': self.username  # Если есть имя пользователя, отправляем
+                'username': self.username
             }
-            
             sock.send(json.dumps(registration_message).encode() + b'\n')
-            
-        # Читаем ответ
+
             data = sock.recv(4096)
             if data:
                 response = json.loads(data.decode())
                 if response.get('type') == 'registration_success':
                     logger.info(f"✅ Успешная регистрация в bootstrap сервере")
-                    # Добавляем полученных пиров в known_peers
-                    for peer_host, peer_port in response.get('peers', []):
+                    # peers теперь список словарей
+                    for peer_info in response.get('peers', []):
+                        peer_host = peer_info.get('host')
+                        peer_port = peer_info.get('port')
+                        if not peer_host or not peer_port:
+                            continue
                         if (peer_host, peer_port) != (host, port):
                             if not any(p.get('host') == peer_host and p.get('port') == peer_port for p in self.known_peers):
                                 self.known_peers.append({
-                                    'host': peer_host, 
+                                    'host': peer_host,
                                     'port': peer_port,
                                     'discovered_at': time.time(),
-                                    'source': 'bootstrap'
+                                    'source': 'bootstrap',
+                                    'username': peer_info.get('username')
                                 })
-                                logger.info(f"📥 Добавлен пир {peer_host}:{peer_port}")
-                    
-                    # ЗАКРЫВАЕМ соединение после регистрации - это нормально!
+                                logger.info(f"📥 Добавлен пир {peer_host}:{peer_port} (username: {peer_info.get('username')})")
                     sock.close()
                     return True
             sock.close()
             return False
-        
+
         except Exception as e:
             logger.warning(f"❌ Не удалось зарегистрироваться в bootstrap сервере: {e}")
             return False
@@ -1249,6 +1295,7 @@ class P2PNetworkClient(QObject):
         auto_connect_interval = 15
         user_list_update_interval = 15  # 15 секунд
         message_cleanup_interval = 300  # 5 минут
+        last_bootstrap_discover = 0
 
         while self.is_running:
             try:
@@ -1265,6 +1312,11 @@ class P2PNetworkClient(QObject):
                     self._connect_to_bootstrap_nodes()
                     last_bootstrap_update = current_time
                 
+                # Где-то внутри while, например, раз в 30 секунд
+                if current_time - last_bootstrap_discover > 30:
+                    self._discover_and_connect_peers_via_bootstrap()
+                    last_bootstrap_discover = current_time
+
                 # Поиск друзей через DHT (раз в минуту)
                 if current_time - last_dht_search >= 60:
                     if self.dht and self.dht.is_running:
@@ -2278,7 +2330,7 @@ class P2PNetworkClient(QObject):
                 self.connected_peers[peer_id]['last_seen'] = time.time()
                 logger.info(f"👤 Пользователь {username} в сети (пир {peer_id})")        
                 # Через пару секунд пробуем установить WebRTC (чтобы не мешать основному обмену)
-                threading.Timer(2.0, self._initiate_webrtc_connection, args=(peer_id, self.connected_peers[peer_id])).start()
+                threading.Timer(2.0, self.initiate_webrtc_with_signal, args=(peer_id, self.connected_peers[peer_id])).start()
                 online_users = self.get_online_users()
                 self.user_list_updated.emit(online_users)
                 logger.info(f"📊 Обновлен список пользователей: {len(online_users)} пользователей онлайн")
@@ -3428,3 +3480,296 @@ class P2PNetworkClient(QObject):
     def connected(self):
         """Свойство для обратной совместимости"""
         return self.is_running
+
+    # ================== СИГНАЛЬНЫЙ КАНАЛ ==================
+
+    def _signal_poll_loop(self):
+        """Цикл опроса сигналов с bootstrap-сервера"""
+        while self.signal_running and self.is_running:
+            try:
+                self._fetch_signals()
+            except Exception as e:
+                logger.debug(f"Ошибка получения сигналов: {e}")
+            time.sleep(self.signal_poll_interval)
+
+    def _fetch_signals(self):
+        """Получить накопленные сигналы для текущего пользователя"""
+        if not self.username or not self.bootstrap_host:
+            return
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.bootstrap_host, self.bootstrap_port))
+            request = {'type': 'get_signals', 'username': self.username}
+            sock.send(json.dumps(request).encode() + b'\n')
+            data = sock.recv(4096)
+            if data:
+                response = json.loads(data.decode())
+                if response.get('type') == 'signal_list':
+                    signals = response.get('signals', [])
+                    for sig in signals:
+                        from_user = sig.get('from')
+                        signal_data = sig.get('data')
+                        if from_user and signal_data:
+                            self._process_signal(from_user, signal_data)
+            sock.close()
+        except Exception as e:
+            logger.debug(f"Ошибка получения сигналов: {e}")
+
+    def _send_signal(self, to_username: str, data: dict) -> bool:
+        """Отправить сигнал (SDP или ICE) через bootstrap"""
+        if not self.bootstrap_host or not self.bootstrap_port:
+            logger.warning("Нет bootstrap-сервера для отправки сигнала")
+            return False
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.bootstrap_host, self.bootstrap_port))
+            msg = {
+                'type': 'signal',
+                'to': to_username,
+                'from': self.username,
+                'data': data
+            }
+            sock.send(json.dumps(msg).encode() + b'\n')
+            # Ждём подтверждение
+            response = sock.recv(1024)
+            sock.close()
+            if response:
+                resp = json.loads(response.decode())
+                return resp.get('type') == 'signal_ack'
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка отправки сигнала: {e}")
+            return False
+
+    def _process_signal(self, from_user: str, signal_data: dict):
+        """Обработка входящего сигнала (SDP offer/answer или ICE-кандидат)"""
+        if 'sdp' in signal_data:
+            sdp_type = signal_data.get('type')
+            if sdp_type == 'offer':
+                asyncio.run_coroutine_threadsafe(
+                    self._handle_incoming_offer(from_user, signal_data),
+                    self.webrtc_loop
+                )
+            elif sdp_type == 'answer':
+                peer_id = f"signal_{from_user}"
+                pc = self.webrtc_connections.get(peer_id)
+                if pc:
+                    asyncio.run_coroutine_threadsafe(
+                        self._handle_incoming_answer(pc, signal_data),
+                        self.webrtc_loop
+                    )
+                else:
+                    logger.warning(f"Получен answer для неизвестного соединения {from_user}")
+        elif 'candidate' in signal_data:
+            self._add_ice_candidate(from_user, signal_data['candidate'])
+
+    async def _handle_incoming_offer(self, from_user: str, signal_data: dict):
+        """Обработка входящего офера через сигнальный канал"""
+        sdp = signal_data.get('sdp')
+        if not sdp:
+            return
+        from aiortc import RTCPeerConnection, RTCSessionDescription, RTCConfiguration, RTCIceServer
+
+        ice_servers = []
+        for srv in self.config.get('media', {}).get('ice_servers', []):
+            urls = srv['urls']
+            username = srv.get('username', '')
+            credential = srv.get('credential', '')
+            if username and credential:
+                ice_servers.append(RTCIceServer(urls=urls, username=username, credential=credential))
+            else:
+                ice_servers.append(RTCIceServer(urls=urls))
+
+        config = RTCConfiguration(iceServers=ice_servers)
+        pc = RTCPeerConnection(configuration=config)
+        peer_id = f"signal_{from_user}"
+        self.webrtc_connections[peer_id] = pc
+
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            logger.info(f"📡 Входящий DataChannel от {from_user}, label={channel.label}")
+            self.webrtc_channels[peer_id] = channel
+            @channel.on("message")
+            def on_message(message):
+                try:
+                    if isinstance(message, bytes):
+                        data = json.loads(message.decode())
+                    else:
+                        data = json.loads(message)
+                    self._process_received_data(data, peer_id)
+                except Exception as e:
+                    logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+
+        offer = RTCSessionDescription(sdp=sdp, type='offer')
+        await pc.setRemoteDescription(offer)
+        answer = await pc.createAnswer()
+        await pc.setLocalDescription(answer)
+
+        # Отправляем ответ через сигнальный канал
+        answer_data = {
+            'sdp': pc.localDescription.sdp,
+            'type': pc.localDescription.type,
+            'candidates': []
+        }
+        self._send_signal(from_user, answer_data)
+        logger.info(f"📤 Ответ WebRTC отправлен через сигнальный канал для {from_user}")
+
+        @pc.on("icecandidate")
+        def on_ice_candidate(candidate):
+            if candidate:
+                candidate_dict = {
+                    'candidate': candidate.candidate,
+                    'sdpMid': candidate.sdpMid,
+                    'sdpMLineIndex': candidate.sdpMLineIndex
+                }
+                self._send_signal(from_user, {'candidate': candidate_dict})
+
+    async def _handle_incoming_answer(self, pc, signal_data):
+        sdp = signal_data.get('sdp')
+        if not sdp:
+            return
+        from aiortc import RTCSessionDescription
+        answer = RTCSessionDescription(sdp=sdp, type='answer')
+        await pc.setRemoteDescription(answer)
+        logger.info("✅ Remote description (answer) установлен")
+
+    def _add_ice_candidate(self, from_user: str, candidate_dict):
+        from aiortc import RTCIceCandidate
+        peer_id = f"signal_{from_user}"
+        pc = self.webrtc_connections.get(peer_id)
+        if pc:
+            candidate = RTCIceCandidate(
+                candidate=candidate_dict['candidate'],
+                sdpMid=candidate_dict['sdpMid'],
+                sdpMLineIndex=candidate_dict['sdpMLineIndex']
+            )
+            asyncio.run_coroutine_threadsafe(pc.addIceCandidate(candidate), self.webrtc_loop)
+
+    
+    async def _async_initiate_webrtc_with_signal(self, target_username: str) -> bool:
+        """Асинхронная версия инициации WebRTC через сигнальный канал (запускается в webrtc_loop)."""
+        if not self.username:
+            logger.error("Нет имени пользователя")
+            return False
+
+        from aiortc import RTCPeerConnection, RTCConfiguration, RTCIceServer
+
+        ice_servers = []
+        for srv in self.config.get('media', {}).get('ice_servers', []):
+            urls = srv['urls']
+            username = srv.get('username', '')
+            credential = srv.get('credential', '')
+            if username and credential:
+                ice_servers.append(RTCIceServer(urls=urls, username=username, credential=credential))
+            else:
+                ice_servers.append(RTCIceServer(urls=urls))
+
+        config = RTCConfiguration(iceServers=ice_servers)
+        pc = RTCPeerConnection(configuration=config)
+
+        peer_id = f"signal_{target_username}"
+        self.webrtc_connections[peer_id] = pc
+
+        channel = pc.createDataChannel("dialog")
+        self.webrtc_channels[peer_id] = channel
+
+        @channel.on("open")
+        def on_open():
+            logger.info(f"✅ WebRTC DataChannel открыт с {target_username}")
+            # Отправляем отложенные сообщения
+            if target_username in self.pending_webrtc_messages:
+                for msg_data, msg_id in self.pending_webrtc_messages[target_username]:
+                    try:
+                        channel.send(json.dumps(msg_data).encode())
+                        logger.info(f"Отправлено отложенное сообщение {msg_id} через WebRTC")
+                    except Exception as e:
+                        logger.error(f"Ошибка отправки отложенного сообщения: {e}")
+                del self.pending_webrtc_messages[target_username]
+
+        @channel.on("message")
+        def on_message(message):
+            try:
+                if isinstance(message, bytes):
+                    data = json.loads(message.decode())
+                else:
+                    data = json.loads(message)
+                self._process_received_data(data, peer_id)
+            except Exception as e:
+                logger.error(f"Ошибка обработки сообщения из WebRTC: {e}")
+
+        # Создаём offer и устанавливаем local description
+        offer = await pc.createOffer()
+        await pc.setLocalDescription(offer)
+
+        signal_data = {
+            'sdp': pc.localDescription.sdp,
+            'type': pc.localDescription.type,
+            'candidates': []
+        }
+        success = self._send_signal(target_username, signal_data)
+        if not success:
+            logger.error("Не удалось отправить офер")
+            await pc.close()
+            del self.webrtc_connections[peer_id]
+            return False
+
+        logger.info(f"📤 Офер WebRTC отправлен через сигнальный канал для {target_username}")
+
+        @pc.on("icecandidate")
+        def on_ice_candidate(candidate):
+            if candidate:
+                candidate_dict = {
+                    'candidate': candidate.candidate,
+                    'sdpMid': candidate.sdpMid,
+                    'sdpMLineIndex': candidate.sdpMLineIndex
+                }
+                self._send_signal(target_username, {'candidate': candidate_dict})
+
+        return True
+    
+    def initiate_webrtc_with_signal(self, target_username: str) -> bool:
+        """Синхронная обёртка для запуска асинхронной инициации WebRTC."""
+        try:
+            return self._run_coro(self._async_initiate_webrtc_with_signal(target_username))
+        except Exception as e:
+            logger.error(f"Ошибка при инициации WebRTC с {target_username}: {e}")
+            return False
+
+    def _discover_and_connect_peers_via_bootstrap(self):
+        """Получить список пиров с bootstrap и инициировать WebRTC с ними"""
+        if not self.bootstrap_host or not self.bootstrap_port:
+            return
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(5)
+            sock.connect((self.bootstrap_host, self.bootstrap_port))
+            request = {'type': 'get_peers'}
+            sock.send(json.dumps(request).encode() + b'\n')
+            data = sock.recv(4096)
+            sock.close()
+            if data:
+                response = json.loads(data.decode())
+                if response.get('type') == 'peer_list':
+                    peers = response.get('peers', [])
+                    for peer in peers:
+                        username = peer.get('username')
+                        if username and username != self.username:
+                            if not self._is_peer_connected(username):
+                                logger.info(f"Обнаружен пир {username}, инициируем WebRTC")
+                                self.initiate_webrtc_with_signal(username)
+        except Exception as e:
+            logger.debug(f"Ошибка получения пиров с bootstrap: {e}")
+
+    def _is_peer_connected(self, username):
+        # Проверка TCP
+        for pid, pinfo in self.connected_peers.items():
+            if pinfo.get('username') == username:
+                return True
+        # Проверка WebRTC
+        peer_id = f"signal_{username}"
+        channel = self.webrtc_channels.get(peer_id)
+        if channel and channel.readyState == 'open':
+            return True
+        return False

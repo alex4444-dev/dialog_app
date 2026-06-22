@@ -2,36 +2,49 @@ network:
   min_port: 9000
   max_port: 10000
   max_port_attempts: 100
-  bootstrap_nodes:                   # Эти узлы используются для начального входа в сеть (и для DHT, и для P2P)
-   - {"host": "localhost", "port": 8888} # здесь следует указывать реальный ip-адрес и порт(вашего сервера или публичный ip)
-   
-
-   
+  # Bootstrap-узлы используются для:
+  # - регистрации в сети
+  # - получения списка активных пиров (с их usernames)
+  # - обмена сигнальными сообщениями (SDP offer/answer, ICE-кандидаты)
+  bootstrap_nodes:
+    - host: "localhost"
+      port: 8888
+    - host: "192.168.0.109"
+      port: 8888
   connection_timeout: 30
+  upnp_enabled: false          # Рекомендуется отключить при CGNAT – TURN решит проблему
 
-# ========== НОВАЯ СЕКЦИЯ DHT ==========
 dht:
-  enabled: true                      # Включить DHT-узел
-  port: 9891                         # UDP порт для DHT (должен отличаться от listen_port)
-  bootstrap_nodes:                   # Список DHT-бутстрап узлов (можно использовать те же, что и в network)
-    - {"host": "router.bittorrent.com", "port": 6881}
-    - {"host": "dht.transmissionbt.com", "port": 6881}
-    - {"host": "router.utorrent.com", "port": 6881}
-  refresh_interval: 3600             # Интервал перепубликации своего адреса (секунды)
-  storage_ttl: 86400                 # Время жизни записи в DHT (секунды) – по умолчанию 24 часа
+  enabled: true                # DHT для децентрализованного поиска (не обязателен для WebRTC)
+  port: 9891
+  bootstrap_nodes:
+    - host: "router.bittorrent.com"
+      port: 6881
+    - host: "dht.transmissionbt.com"
+      port: 6881
+    - host: "router.utorrent.com"
+      port: 6881
+  refresh_interval: 3600
+  storage_ttl: 86400
 
 media:
   audio_codec: "opus"
   audio_bitrate: 128
   audio_sample_rate: 48000
+  # ICE-серверы для WebRTC – STUN для обхода NAT, TURN как ретранслятор при CGNAT
   ice_servers:
-    - {"urls": "stun:stun.l.google.com:19302"}
-    - {"urls": "stun:stun1.l.google.com:19302"}
-    - {"urls": "stun:stun.ya.ru:3478"}
-    - {"urls": "stun:stun.calls.yandex.ru:3478"}
-    - {"urls": "stun:stun.mail.ru:3478"}
-    - {"urls": "turn:openrelay.metered.ca:80", "username": "openrelayproject", "credential": "openrelayproject"}
-    - {"urls": "turn:openrelay.metered.ca:443", "username": "openrelayproject", "credential": "openrelayproject"}
+    - urls: "stun:stun.l.google.com:19302"
+    - urls: "stun:stun1.l.google.com:19302"
+    - urls: "stun:stun.ya.ru:3478"
+    - urls: "stun:stun.calls.yandex.ru:3478"
+    - urls: "stun:stun.mail.ru:3478"
+    # Бесплатные TURN-серверы (ограниченный трафик, но для тестов подходят)
+    - urls: "turn:openrelay.metered.ca:80"
+      username: "openrelayproject"
+      credential: "openrelayproject"
+    - urls: "turn:openrelay.metered.ca:443"
+      username: "openrelayproject"
+      credential: "openrelayproject"
   rtp_port_range:
     min: 10000
     max: 20000

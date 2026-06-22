@@ -214,7 +214,8 @@ class P2PMainWindow(QMainWindow):
         try:
             dialog = SettingsDialog(parent=self,
                                     input_device=self.audio_input_device,
-                                    output_device=self.audio_output_device)
+                                    output_device=self.audio_output_device,
+                                    p2p_client=self.p2p_client)
             # Подключаем сигнал для получения изменённых настроек
             dialog.settings_changed.connect(self.on_settings_changed)
             dialog.exec_()
@@ -1126,32 +1127,19 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.on_call_requested: Ошибка запроса звонка: {e}")
 
     def update_peers_from_p2p(self):
-        """Обновление информации о пирах - работаем напрямую с P2PNetworkClient"""
+        """Обновление списка пользователей из P2P клиента"""
         try:
-            peers_data = []
-            
-            # Проверяем доступность P2P клиента
             if not hasattr(self, 'p2p_client') or self.p2p_client is None:
                 return
-            
-            p2p_client = self.p2p_client
-        
-            # Получаем подключенные пиры (исключая bootstrap)
-            connected_peers = []
-            if hasattr(p2p_client, 'connected_peers'):
-                try:
-                    connected_peers = list(p2p_client.connected_peers)
-                    # Фильтруем bootstrap узлы
-                    connected_peers = [
-                        peer for peer in connected_peers 
-                        if not self._is_bootstrap_peer(peer, p2p_client)
-                    ]
-                except Exception as e:
-                    self.logger.warning(f"Ошибка получения connected_peers: {e}")
-            
+            online_users = self.p2p_client.get_online_users()
+            if online_users:
+                self.logger.info(f"update_peers_from_p2p: получено {len(online_users)} пользователей")
+            else:
+                self.logger.debug("update_peers_from_p2p: список пользователей пуст")
+            self.update_user_list(online_users)
         except Exception as e:
-            self.logger.error(f"Ошибка получения информации о пирах: {e}")
-
+            self.logger.error(f"Ошибка обновления пиров: {e}")
+    
     def _is_bootstrap_peer(self, peer, p2p_client):
         try:
             if isinstance(peer, str):

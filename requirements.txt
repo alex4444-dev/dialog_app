@@ -11,3 +11,4 @@ qrcode[pil]
 Pillow
 colorlog
 kademlia
+miniupnpc
