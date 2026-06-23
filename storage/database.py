@@ -149,11 +149,10 @@ class ClientDatabase:
             conn.close()
     
     def get_user_messages(self, username: str, other_user: str, limit: int = 100) -> List[Dict]:
-        """Получение истории сообщений с пользователем"""
         conn = self._get_connection()
         try:
             cursor = conn.execute('''
-                SELECT from_user, to_user, message, timestamp 
+                SELECT from_user, to_user, message, timestamp, message_id
                 FROM messages 
                 WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)
                 ORDER BY timestamp DESC
@@ -166,13 +165,13 @@ class ClientDatabase:
                     'from_user': row[0],
                     'to_user': row[1],
                     'message': row[2],
-                    'timestamp': row[3]
+                    'timestamp': row[3],
+                    'message_id': row[4]
                 })
-            
-            return messages[::-1]  # Возвращаем в хронологическом порядке
+            return messages[::-1]
         finally:
             conn.close()
-    
+
     def get_online_users(self) -> List[Dict]:
         """Получение списка онлайн пользователей (из локальной БД)"""
         # В P2P архитектуре этот метод может быть дополнен

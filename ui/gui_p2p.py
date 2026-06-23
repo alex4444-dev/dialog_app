@@ -831,7 +831,7 @@ class P2PMainWindow(QMainWindow):
 
             # Очищаем имя от возможных лишних символов
             clean_username = username.replace("👤 ", "").replace("💬 ", "").strip()
-
+            
             # КЛЮЧ – ТОЛЬКО ИМЯ ПОЛЬЗОВАТЕЛЯ, без IP:порта
             user_key = clean_username
 
@@ -848,6 +848,7 @@ class P2PMainWindow(QMainWindow):
             # Создаём новый чат (host и port передаются только для информации, если нужны)
             logger.info(f"P2PMainWindow.open_chat: Создание нового чата с {clean_username}")
             chat_window = ChatWindow(clean_username, host, port)
+            chat_window.message_deleted.connect(self.on_message_deleted)
 
             # Загрузка истории сообщений
             messages = self.db.get_user_messages(self.username, clean_username, limit=200)
@@ -870,13 +871,15 @@ class P2PMainWindow(QMainWindow):
                     else:
                         chat_window.add_system_message(msg['message'])
                 else:
-                    chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own)
+                    chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own, message_id=msg.get('message_id'))
                 
             # Подключаем сигналы
             chat_window.message_sent.connect(self.on_message_sent)
             chat_window.unread_count_changed.connect(self.on_unread_count_changed)
             chat_window.call_requested.connect(self.on_call_requested)
             chat_window.file_sent.connect(self.on_file_sent)
+            chat_window.message_deleted.connect(self.on_message_deleted)
+            chat_window.clear_all_messages_requested.connect(self.on_clear_all_messages)
 
             # Добавляем вкладку
             tab_index = self.tabs.addTab(chat_window, f"💬 {clean_username}")
@@ -961,6 +964,83 @@ class P2PMainWindow(QMainWindow):
                 logger.error("P2PMainWindow.on_message_sent: P2P клиент не доступен")
         except Exception as e:
             logger.error(f"P2PMainWindow.on_message_sent: Ошибка отправки сообщения: {e}")
+
+    def on_message_deleted(self, username, message_id):
+        """Удаляет одно сообщение из БД и перезагружает историю чата."""
+        if message_id == "__refresh__":
+            return
+
+        if not self.db or not message_id:
+            logger.warning(f"on_message_deleted: нет БД или message_id={message_id}")
+            return
+
+        # 1. Удаляем из БД
+        conn = self.db._get_connection()
+        try:
+            conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+            conn.commit()
+            logger.info(f"✅ Сообщение {message_id} удалено из БД")
+        except Exception as e:
+            logger.error(f"Ошибка удаления сообщения {message_id}: {e}")
+            return
+        finally:
+            conn.close()
+
+        # 2. Перезагружаем историю для этого чата
+        if username in self.chat_windows:
+            chat_window = self.chat_windows[username]
+
+            # ОЧИЩАЕМ СТАРЫЙ СЛОВАРЬ ИНДЕКСОВ
+            chat_window.message_ids.clear()
+
+            # Очищаем виджет
+            chat_window.chat_history.clear()
+
+            # Загружаем заново из БД
+            messages = self.db.get_user_messages(self.username, username, limit=200)
+
+            for msg in messages:
+                is_own = (msg['from_user'] == self.username)
+                if msg['from_user'] == 'system':
+                    chat_window.add_system_message(msg['message'])
+                else:
+                    # ВАЖНО: передаём message_id, чтобы словарь заполнился правильными индексами
+                    chat_window.add_message(
+                        msg['from_user'],
+                        msg['message'],
+                        is_own=is_own,
+                        message_id=msg.get('message_id')
+                    )
+
+            logger.info(f"История чата с {username} перезагружена после удаления")
+        else:
+            logger.warning(f"Чат с {username} не найден, обновление невозможно")
+
+    def on_clear_all_messages(self, username):
+        """Удалить все сообщения с пользователем из БД и очистить чат."""
+        reply = QMessageBox.question(
+            self,
+            "Удаление всех сообщений",
+            f"Вы уверены, что хотите удалить все сообщения с {username}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            # Удаляем из БД
+            conn = self.db._get_connection()
+            try:
+                conn.execute(
+                    "DELETE FROM messages WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)",
+                    (self.username, username, username, self.username)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            # Очищаем интерфейс чата
+            if username in self.chat_windows:
+                chat_window = self.chat_windows[username]
+                chat_window.clear_chat()
+                # Добавляем системное сообщение об очистке
+                chat_window.add_system_message("История сообщений очищена")
 
     def get_call_socket(self, call_id):
         """Получить сокет для звонка по его ID"""

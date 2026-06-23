@@ -358,7 +358,6 @@ class AudioSettingsPage(QWidget):
         self.audio_system_label = QLabel("Определение звуковой системы...")
         self.audio_system_label.setAlignment(Qt.AlignCenter)
         self.audio_system_label.setWordWrap(True)
-        #self.audio_system_label.setStyleSheet("font-size: 12px; color: #7f8c8d; font-style: italic;")
         audio_layout.addWidget(self.audio_system_label)
 
         mic_layout = QHBoxLayout()

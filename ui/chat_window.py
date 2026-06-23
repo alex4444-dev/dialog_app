@@ -1,7 +1,8 @@
 import time
 import logging
+import re
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QTextBrowser, 
-                             QLineEdit, QPushButton, QHBoxLayout, QApplication)
+                             QLineEdit, QPushButton, QHBoxLayout, QApplication, QMenu, QMessageBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtGui import QDesktopServices
 from ui.styles.main_style import CHAT_WINDOW_STYLE
@@ -13,7 +14,9 @@ class ChatWindow(QWidget):
     unread_count_changed = pyqtSignal(str, int)  # username, unread_count
     call_requested = pyqtSignal(str, str)  # username, call_type
     file_sent = pyqtSignal(str, str)  # username, file_path
-    
+    message_deleted = pyqtSignal(str, str)  # username, message_id (опционально)
+    clear_all_messages_requested = pyqtSignal(str)  # username
+
     def __init__(self, username, host="unknown", port=0):
         super().__init__()
         self.username = username
@@ -22,6 +25,10 @@ class ChatWindow(QWidget):
         self.message_count = 0
         self.unread_count = 0
         self.is_active_tab = False
+        self.message_ids = {}  # номер_строки -> message_id
+        self.current_message_id = None
+        self.current_message_text = ""  # для отображения в диалоге
+        
         
         logger.info(f"ChatWindow.__init__: Создание чата с {username} ({host}:{port})")
         
@@ -55,6 +62,10 @@ class ChatWindow(QWidget):
             self.chat_history.setOpenExternalLinks(False)
             # Подключаем сигнал клика по ссылке
             self.chat_history.anchorClicked.connect(self.on_anchor_clicked)
+            # Включаем контекстное меню
+            self.chat_history.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.chat_history.customContextMenuRequested.connect(self.show_context_menu)
+                
             layout.addWidget(self.chat_history)
             
             # Кнопки звонков
@@ -148,29 +159,54 @@ class ChatWindow(QWidget):
         except Exception as e:
             logger.error(f"ChatWindow.send_message: Ошибка отправки сообщения: {e}")
             
-    def add_message(self, sender, message, is_own=False):
+    def add_message(self, sender, message, is_own=False, message_id=None):
+        """
+        Добавляет сообщение в историю чата.
+        :param sender: имя отправителя
+        :param message: текст сообщения
+        :param is_own: True, если сообщение отправлено текущим пользователем
+        :param message_id: уникальный идентификатор сообщения (из БД или генерируется)
+        """
         try:
             logger.info(f"ChatWindow.add_message: Добавление сообщения в чат {self.username}: {sender} - {message}")
             self.message_count += 1
+
+            # Учёт непрочитанных
             if not is_own and not self.is_active_tab:
                 self.unread_count += 1
                 self.unread_count_changed.emit(self.username, self.unread_count)
                 logger.info(f"ChatWindow.add_message: Увеличено количество непрочитанных до {self.unread_count}")
+
             self.update_title()
             timestamp = time.strftime("%H:%M:%S")
+
+            # Генерация временного ID, если не передан
+            if not message_id:
+                message_id = f"local_{int(time.time())}_{self.message_count}"
+
+            # Формируем HTML-строку с атрибутом data-msgid
             if is_own:
-                full_message = f"[{timestamp}] 👤 Вы: {message}"
+                full_message = f'<span data-msgid="{message_id}">[{timestamp}] 👤 Вы: {message}</span>'
             else:
-                full_message = f"[{timestamp}] 👤 {sender}: {message}"
+                full_message = f'<span data-msgid="{message_id}">[{timestamp}] 👤 {sender}: {message}</span>'
+
             self.chat_history.append(full_message)
+
+            # Сохраняем message_id для этого блока (индекс последнего добавленного блока)
+            block_count = self.chat_history.document().blockCount()
+            self.message_ids[block_count - 1] = message_id
+
+            # Прокрутка вниз
             scrollbar = self.chat_history.verticalScrollBar()
             scrollbar.setValue(scrollbar.maximum())
             self.chat_history.repaint()
             QApplication.processEvents()
+
             logger.info(f"ChatWindow.add_message: Сообщение успешно добавлено в чат {self.username}: '{full_message}'")
+
         except Exception as e:
             logger.error(f"ChatWindow.add_message: Ошибка при добавлении сообщения в чат: {e}")
-            
+
     def add_system_message(self, message):
         try:
             timestamp = time.strftime("%H:%M:%S")
@@ -181,6 +217,17 @@ class ChatWindow(QWidget):
             logger.info(f"ChatWindow.add_system_message: Добавлено системное сообщение: {message}")
         except Exception as e:
             logger.error(f"ChatWindow.add_system_message: Ошибка добавления системного сообщения: {e}")
+
+    def rebuild_message_ids(self):
+        """Перестраивает словарь message_ids на основе текущего содержимого chat_history."""
+        self.message_ids.clear()
+        html = self.chat_history.toHtml()
+        # Ищем все span с data-msgid
+        import re
+        pattern = r'<span data-msgid="([^"]+)"'
+        matches = re.finditer(pattern, html)
+    
+   
 
     def add_file_notification(self, file_name, file_path, is_sent=True):
         """Добавление системного сообщения с кликабельной ссылкой на файл"""
@@ -197,11 +244,70 @@ class ChatWindow(QWidget):
         scrollbar = self.chat_history.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
             
+    def show_context_menu(self, pos):
+        cursor = self.chat_history.cursorForPosition(pos)
+        if cursor.isNull():
+            return
+
+        block = cursor.block()
+        block_text = block.text()
+        if not block_text.strip():
+            return
+
+        block_number = block.blockNumber()
+        message_id = self.message_ids.get(block_number)
+
+        if message_id is None:
+            return
+
+        self.current_message_id = message_id
+        self.current_message_text = block_text.strip()
+
+        menu = QMenu(self)
+        delete_single = menu.addAction("Удалить это сообщение")
+        delete_all = menu.addAction("🗑️ Удалить все сообщения с этим пользователем")
+
+        action = menu.exec_(self.chat_history.mapToGlobal(pos))
+
+        if action == delete_single:
+            self.delete_selected_message()
+        elif action == delete_all:
+            self.clear_all_messages_requested.emit(self.username)
+
+    def delete_selected_message(self):
+        """Удаляет выбранное сообщение (локально)."""
+        if not self.current_message_id:
+            return
+        
+        # Подтверждение
+        reply = QMessageBox.question(
+            self, "Подтверждение удаления",
+            f"Вы действительно хотите удалить это сообщение?\n\n{self.current_message_text[:100]}...",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            self.message_deleted.emit(self.username, self.current_message_id)
+            self.current_message_id = None
+
+        
+
+    def refresh_history(self):
+        """Перезагружает историю сообщений из БД."""
+        # Этот метод должен вызываться из главного окна, которое имеет доступ к БД.
+        # Можно передать колбэк или сигнал.
+        # Пока просто очищаем и добавляем системное сообщение.
+        self.chat_history.clear()
+        # Здесь должен быть вызов загрузки из БД через главное окно.
+        # Для простоты: emit сигнал, чтобы главное окно перезагрузило историю.
+        self.message_deleted.emit(self.username, "__refresh__")
+    
     def clear_chat(self):
         try:
             self.chat_history.clear()
             self.message_count = 0
             self.unread_count = 0
+            self.message_ids.clear()   # очищаем словарь
             self.update_title()
             logger.info(f"ChatWindow.clear_chat: История чата с {self.username} очищена")
         except Exception as e:
