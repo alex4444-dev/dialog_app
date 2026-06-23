@@ -1873,16 +1873,16 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"❌ Ошибка настройки медиа: {e}")
             return False
 
-    def update_network_status(self, is_connected: bool, peer_count: int):
+    def update_network_status(self, is_connected: bool, peer_count: int = 0):
         """Обновление статуса сети"""
         if is_connected:
-            status_text = f"✅ P2P сеть: Подключено ({peer_count} пиров)" 
+            status_text = f"✅ Сеть подключена" 
             self.statusBar().showMessage(status_text)
             # Обновляем системный чат
             if hasattr(self, 'system_chat'):
-                self.logger.info(f"🌐 Сеть: подключено {peer_count} пиров")
+                self.logger.info(f"🌐 Сеть подключена")
         else:
-            status_text = "❌ P2P сеть: Не подключено"
+            status_text = "❌ Сеть не подключена"
             self.statusBar().showMessage(status_text)
     
         # Обновляем статус в панели пользователей
@@ -2300,7 +2300,6 @@ class P2PMainWindow(QMainWindow):
         # Основная информация
         info = QLabel(
             "<b>💬 ДИАЛОГ</b> – Коммуникационная платформа<br><br>"
-            "<b>Версия:</b> 1.0.0<br>"
             "<b>Описание:</b> Программа для общения с людьми в сети интернет, \n используя аудио/видео звонки и текстовые сообщения<br>"
             "<b>Автор:</b> Алексей Григорьев<br>"
             "<b>Год выпуска:</b> 2026<br><br>"
@@ -2315,7 +2314,7 @@ class P2PMainWindow(QMainWindow):
         license_btn = QPushButton("📄 Лицензионное соглашение")
         license_btn.clicked.connect(self.open_license)
         layout.addWidget(license_btn, alignment=Qt.AlignCenter)
-
+        dialog.setStyleSheet(MAIN_WINDOW_STYLE)
         dialog.exec_()
 
     def open_license(self):

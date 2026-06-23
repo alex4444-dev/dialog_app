@@ -22,6 +22,20 @@ from PyQt5.QtGui import QImage, QPixmap, QKeySequence
 import sounddevice as sd
 import numpy as np
 
+
+# Добавляем путь к текущей директории для импорта модулей
+current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.insert(0, current_dir)
+    
+
+# Импортируем стили
+try:
+    from styles.main_style import MAIN_WINDOW_STYLE
+except ImportError as e:
+    print(f"Ошибка импорта стилей: {e}")
+    MAIN_WINDOW_STYLE = ""
+
 logger = logging.getLogger('dialog_gui')
 
 
@@ -339,13 +353,12 @@ class AudioSettingsPage(QWidget):
         layout.setSpacing(12)
 
         audio_group = QGroupBox("Аудио устройства")
-        audio_group.setStyleSheet("QGroupBox { font-weight: bold; }")
         audio_layout = QVBoxLayout(audio_group)
 
         self.audio_system_label = QLabel("Определение звуковой системы...")
         self.audio_system_label.setAlignment(Qt.AlignCenter)
         self.audio_system_label.setWordWrap(True)
-        self.audio_system_label.setStyleSheet("font-size: 12px; color: #7f8c8d; font-style: italic;")
+        #self.audio_system_label.setStyleSheet("font-size: 12px; color: #7f8c8d; font-style: italic;")
         audio_layout.addWidget(self.audio_system_label)
 
         mic_layout = QHBoxLayout()
@@ -1115,8 +1128,11 @@ class NetworkSettingsPage(QWidget):
         self.settings = QSettings('DialogApp', 'P2PClient')
         self.p2p_client = p2p_client
         self.init_ui()
+        self.ice_servers = []  # список словарей с ключами urls, username, credential
         self.load_settings()
         self.load_ice_servers()
+        self.update_network_status()
+
         try:
             self.refresh_external_ip()
         except Exception as e:
@@ -1131,7 +1147,7 @@ class NetworkSettingsPage(QWidget):
         port_layout = QHBoxLayout()
         self.port_spin = QSpinBox()
         self.port_spin.setRange(1024, 65535)
-        self.port_spin.setToolTip("Порт, на котором клиент будет принимать P2P-подключения")
+        self.port_spin.setToolTip("Порт, на котором клиент будет принимать подключения")
         port_layout.addWidget(QLabel("Порт:"))
         port_layout.addWidget(self.port_spin)
         port_layout.addStretch()
@@ -1139,7 +1155,7 @@ class NetworkSettingsPage(QWidget):
         layout.addWidget(port_group)
 
         bootstrap_group = QGroupBox("Bootstrap-узлы")
-        bootstrap_group.setToolTip("Узлы для первоначального входа в P2P-сеть")
+        bootstrap_group.setToolTip("Узлы для первоначального входа в сеть")
         bootstrap_layout = QVBoxLayout()
         self.bootstrap_table = QTableWidget()
         self.bootstrap_table.setColumnCount(2)
@@ -1181,6 +1197,21 @@ class NetworkSettingsPage(QWidget):
         self.turn_enabled_check.toggled.connect(self.on_turn_toggled)
         ice_layout.addWidget(self.turn_enabled_check)
         ice_group.setLayout(ice_layout)
+
+        # Кнопки управления ICE-серверами
+        ice_btn_layout = QHBoxLayout()
+        self.add_ice_btn = QPushButton("➕ Добавить")
+        self.add_ice_btn.clicked.connect(self.add_ice_server)
+        self.edit_ice_btn = QPushButton("✏️ Изменить")
+        self.edit_ice_btn.clicked.connect(self.edit_ice_server)
+        self.del_ice_btn = QPushButton("🗑️ Удалить")
+        self.del_ice_btn.clicked.connect(self.delete_ice_server)
+        ice_btn_layout.addWidget(self.add_ice_btn)
+        ice_btn_layout.addWidget(self.edit_ice_btn)
+        ice_btn_layout.addWidget(self.del_ice_btn)
+        ice_btn_layout.addStretch()
+        ice_layout.addLayout(ice_btn_layout)
+
         layout.addWidget(ice_group)
 
         info_group = QGroupBox("Статус сети")
@@ -1200,10 +1231,6 @@ class NetworkSettingsPage(QWidget):
         self.test_connection_btn = QPushButton("🔍 Проверить подключение (bootstrap и TURN)")
         self.test_connection_btn.clicked.connect(self.test_connection)
         btn_row.addWidget(self.test_connection_btn)
-
-        self.save_restart_btn = QPushButton("🔄 Сохранить и перезапустить сеть")
-        self.save_restart_btn.clicked.connect(self.on_restart_clicked)
-        btn_row.addWidget(self.save_restart_btn)
         layout.addLayout(btn_row)
 
         layout.addStretch()
@@ -1221,18 +1248,131 @@ class NetworkSettingsPage(QWidget):
                 config = self.p2p_client.config
             else:
                 config = self._load_config_from_file()
-            ice_servers = config.get('media', {}).get('ice_servers', [])
-            self.ice_table.setRowCount(len(ice_servers))
-            for row, srv in enumerate(ice_servers):
-                urls = srv.get('urls', '')
-                username = srv.get('username', '')
-                credential = srv.get('credential', '')
-                self.ice_table.setItem(row, 0, QTableWidgetItem(urls))
-                self.ice_table.setItem(row, 1, QTableWidgetItem(username))
-                self.ice_table.setItem(row, 2, QTableWidgetItem(credential))
-            self.ice_table.resizeColumnsToContents()
+            self.ice_servers = config.get('media', {}).get('ice_servers', []).copy()
+            self.update_ice_table()
         except Exception as e:
             logger.error(f"Ошибка загрузки ICE-серверов: {e}")
+            self.ice_servers = []
+            self.update_ice_table()
+
+    def update_ice_table(self):
+        self.ice_table.setRowCount(len(self.ice_servers))
+        for row, srv in enumerate(self.ice_servers):
+            self.ice_table.setItem(row, 0, QTableWidgetItem(srv.get('urls', '')))
+            self.ice_table.setItem(row, 1, QTableWidgetItem(srv.get('username', '')))
+            self.ice_table.setItem(row, 2, QTableWidgetItem(srv.get('credential', '')))
+        self.ice_table.resizeColumnsToContents()
+
+    def add_ice_server(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Добавить ICE-сервер")
+        layout = QVBoxLayout(dialog)
+        form_layout = QFormLayout()
+        url_edit = QLineEdit()
+        url_edit.setPlaceholderText("stun:stun.l.google.com:19302")
+        user_edit = QLineEdit()
+        user_edit.setPlaceholderText("логин (если требуется)")
+        pass_edit = QLineEdit()
+        pass_edit.setPlaceholderText("пароль (если требуется)")
+        pass_edit.setEchoMode(QLineEdit.Password)
+        form_layout.addRow("URL:", url_edit)
+        form_layout.addRow("Логин:", user_edit)
+        form_layout.addRow("Пароль:", pass_edit)
+        layout.addLayout(form_layout)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            urls = url_edit.text().strip()
+            username = user_edit.text().strip()
+            credential = pass_edit.text().strip()
+            if urls:
+                new_server = {'urls': urls}
+                if username:
+                    new_server['username'] = username
+                if credential:
+                    new_server['credential'] = credential
+                self.ice_servers.append(new_server)
+                self.update_ice_table()
+                self.save_ice_servers()
+
+    def edit_ice_server(self):
+        row = self.ice_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Редактирование", "Выберите сервер для редактирования")
+            return
+        srv = self.ice_servers[row]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Редактировать ICE-сервер")
+        layout = QVBoxLayout(dialog)
+        form_layout = QFormLayout()
+        url_edit = QLineEdit(srv.get('urls', ''))
+        user_edit = QLineEdit(srv.get('username', ''))
+        pass_edit = QLineEdit(srv.get('credential', ''))
+        pass_edit.setEchoMode(QLineEdit.Password)
+        form_layout.addRow("URL:", url_edit)
+        form_layout.addRow("Логин:", user_edit)
+        form_layout.addRow("Пароль:", pass_edit)
+        layout.addLayout(form_layout)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        if dialog.exec_() == QDialog.Accepted:
+            urls = url_edit.text().strip()
+            username = user_edit.text().strip()
+            credential = pass_edit.text().strip()
+            if urls:
+                self.ice_servers[row]['urls'] = urls
+                self.ice_servers[row]['username'] = username
+                self.ice_servers[row]['credential'] = credential
+                self.update_ice_table()
+                self.save_ice_servers()
+
+    def delete_ice_server(self):
+        row = self.ice_table.currentRow()
+        if row < 0:
+            QMessageBox.information(self, "Удаление", "Выберите сервер для удаления")
+            return
+        reply = QMessageBox.question(self, "Подтверждение",
+                                    "Удалить выбранный ICE-сервер?",
+                                    QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            self.ice_servers.pop(row)
+            self.update_ice_table()
+            self.save_ice_servers()
+
+    def save_ice_servers(self):
+        try:
+            # Обновляем конфиг в p2p_client, если есть
+            if self.p2p_client and hasattr(self.p2p_client, 'config'):
+                if 'media' not in self.p2p_client.config:
+                    self.p2p_client.config['media'] = {}
+                self.p2p_client.config['media']['ice_servers'] = self.ice_servers.copy()
+            # Сохраняем в config.yaml
+            self._save_ice_to_config()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения ICE-серверов: {e}")
+
+    def _save_ice_to_config(self):
+        import yaml
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        config_path = os.path.join(project_root, 'config.yaml')
+        try:
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+            else:
+                config = {}
+            if 'media' not in config:
+                config['media'] = {}
+            config['media']['ice_servers'] = self.ice_servers.copy()
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
+        except Exception as e:
+            logger.error(f"Ошибка сохранения ICE-серверов в config.yaml: {e}")
 
     def _load_config_from_file(self):
         import yaml
@@ -1351,6 +1491,18 @@ class NetworkSettingsPage(QWidget):
 
         QMessageBox.information(self, "Результаты проверки", "\n".join(results))
 
+    def update_network_status(self):
+        if self.p2p_client:
+            try:
+                connected = len(self.p2p_client.connected_peers) if hasattr(self.p2p_client, 'connected_peers') else 0
+                known = len(self.p2p_client.known_peers) if hasattr(self.p2p_client, 'known_peers') else 0
+                status = "✅ Подключено" if connected > 0 else "❌ Не подключено"
+                self.status_label.setText(status)
+                self.peers_label.setText(str(connected))
+                self.known_peers_label.setText(str(known))
+            except Exception as e:
+                logger.error(f"Ошибка обновления статуса сети: {e}")
+
     def _get_ice_servers(self):
         if hasattr(self, 'p2p_client') and self.p2p_client:
             config = self.p2p_client.config
@@ -1359,47 +1511,72 @@ class NetworkSettingsPage(QWidget):
         return config.get('media', {}).get('ice_servers', [])
 
     def load_settings(self):
-        try:
-            self.port_spin.setValue(self.settings.value('network_port', 8890, type=int))
-            use_turn = self.settings.value('use_turn', True, type=bool)
-            try:
-                self.turn_enabled_check.setChecked(use_turn)
-            except RuntimeError:
-                pass
+        port = self.settings.value('network_port', 8890, type=int)
+        self.port_spin.setValue(port)
 
+        # Загружаем bootstrap-узлы из config.yaml (приоритет)
+        nodes = self._load_defaults_from_config()
+        if not nodes:
+            # если нет, из QSettings
             size = self.settings.beginReadArray("bootstrap_nodes")
-            nodes = []
             for i in range(size):
                 self.settings.setArrayIndex(i)
                 host = self.settings.value("host")
-                port = self.settings.value("port")
-                if host and port:
-                    nodes.append((host, port))
+                p = self.settings.value("port")
+                if host and p:
+                    nodes.append((host, p))
             self.settings.endArray()
-            if not nodes:
-                nodes = self._load_defaults_from_config()
-                if not nodes:
-                    nodes = [("localhost", 8888)]
-            self.update_bootstrap_table(nodes)
-        except Exception as e:
-            logger.error(f"Ошибка загрузки сетевых настроек: {e}")
+        if not nodes:
+            nodes = [("localhost", 8888)]
+        self.update_bootstrap_table(nodes)
 
+        # Состояние чекбокса TURN
+        use_turn = self.settings.value('use_turn', True, type=bool)
+        self.turn_enabled_check.setChecked(use_turn)
+    
     def save_settings(self):
+        port = self.port_spin.value()
+        nodes = self.get_bootstrap_nodes()
+        use_turn = self.turn_enabled_check.isChecked()
+
+        # Сохраняем в QSettings
+        self.settings.setValue('network_port', port)
+        self.settings.setValue('use_turn', use_turn)
+        self.settings.beginWriteArray("bootstrap_nodes")
+        for i, (host, p) in enumerate(nodes):
+            self.settings.setArrayIndex(i)
+            self.settings.setValue("host", host)
+            self.settings.setValue("port", p)
+        self.settings.endArray()
+        self.settings.sync()
+
+        # Сохраняем в config.yaml (если клиент есть – обновляем его)
+        if self.p2p_client:
+            self.p2p_client.listen_port = port
+            self.p2p_client.bootstrap_nodes = [{'host': h, 'port': p} for h, p in nodes]
+            # также можно обновить media.ice_servers, но они обычно не меняются через UI
+        self._save_to_config(port, nodes)
+        self.save_ice_servers()
+
+    def _save_to_config(self, port, nodes):
+        import yaml
+        current_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(current_dir)
+        config_path = os.path.join(project_root, 'config.yaml')
         try:
-            self.settings.setValue('network_port', self.port_spin.value())
-            try:
-                self.settings.setValue('use_turn', self.turn_enabled_check.isChecked())
-            except RuntimeError:
-                self.settings.setValue('use_turn', True)
-            self.settings.beginWriteArray("bootstrap_nodes")
-            for i, (host, port) in enumerate(self.get_bootstrap_nodes()):
-                self.settings.setArrayIndex(i)
-                self.settings.setValue("host", host)
-                self.settings.setValue("port", port)
-            self.settings.endArray()
-            self.settings.sync()
+            if os.path.exists(config_path):
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config = yaml.safe_load(f) or {}
+            else:
+                config = {}
+            if 'network' not in config:
+                config['network'] = {}
+            config['network']['bootstrap_nodes'] = [{'host': h, 'port': p} for h, p in nodes]
+            config['network']['min_port'] = port  # или другой ключ
+            with open(config_path, 'w', encoding='utf-8') as f:
+                yaml.dump(config, f, allow_unicode=True, default_flow_style=False)
         except Exception as e:
-            logger.error(f"Ошибка сохранения сетевых настроек: {e}")
+            logger.error(f"Ошибка сохранения config.yaml: {e}")
 
     def get_bootstrap_nodes(self):
         nodes = []
@@ -1556,10 +1733,11 @@ class SettingsDialog(QDialog):
                 border-bottom: 1px solid #ddd;
             }
             QListWidget::item:selected {
-                background-color: #3498db;
+                background-color: #8f949a;
                 color: white;
             }
         """)
+        
         main_layout.addWidget(self.nav_list)
 
         right_widget = QWidget()
@@ -1639,6 +1817,9 @@ class SettingsDialog(QDialog):
         self.video_page.video_settings_changed.connect(self.on_video_settings_changed)
 
         self.nav_list.setCurrentRow(0)
+        self.setStyleSheet(MAIN_WINDOW_STYLE)
+        
+
 
     def on_nav_changed(self, current, previous):
         if current is None:

@@ -45,16 +45,31 @@ MAIN_WINDOW_STYLE = """
     QTextEdit {
         border: 1px solid #ced4da;
         border-radius: 6px;
-        padding: 12px;
-        font-size: 18px;
+        padding: 10px;
+        font-size: 16px;
         background-color: white;
         font-family: 'Segoe UI', Arial, sans-serif;
+    }
+    QLabel {
+        font-size: 16px;
+    }
+    QCheckBox {
+        font-size: 16px;
+    }
+    QGroupBox {
+        font-size: 16px;
+        font-weight: bold;
+    }
+    QGroupBox::title {
+        subcontrol-origin: margin;
+        left: 5px;
+        padding: 0 5px;
     }
     QListWidget {
         border: 1px solid #ced4da;
         border-radius: 6px;
         background-color: white;
-        font-size: 18px;
+        font-size: 16px;
         font-family: 'Segoe UI', Arial, sans-serif;
         outline: none;
     }
@@ -72,30 +87,31 @@ MAIN_WINDOW_STYLE = """
         border-radius: 4px;
     }
     QPushButton {
-        background-color: #007bff;
-        color: white;
-        border: none;
+        background-color: #f8f9fa;
+        color: black;
+        border: 1px outset #898b8c;
         border-radius: 6px;
-        padding: 10px 20px;
-        font-size: 18px;
-        font-weight: 500;
+        padding: 8px 18px;
+        font-size: 16px;
+        font-weight: 300;
         font-family: 'System-UI', 'Segoe UI', Arial, sans-serif;
     }
     QPushButton:hover {
-        background-color: #0056b3;
+        background-color: #c3c3c3;
     }
     QPushButton:pressed {
-        background-color: #004085;
+        background-color: #4f6070;
+        border: none;
     }
     QPushButton:disabled {
-        background-color: #6c757d;
-        color: #adb5bd;
+        background-color: #f8f9fa;
+        color: #525354;
     }
     QLineEdit {
         border: 2px solid #e9ecef;
         border-radius: 6px;
-        padding: 10px 12px;
-        font-size: 18px;
+        padding: 8px 10px;
+        font-size: 16px;
         background-color: white;
         font-family: 'System UI', 'Segoe UI', Arial, sans-serif;
         selection-background-color: #007bff;
@@ -103,6 +119,15 @@ MAIN_WINDOW_STYLE = """
     QLineEdit:focus {
         border: 2px solid #007bff;
         background-color: #fafafa;
+    }
+    QSpinBox {
+        font-size: 16px;
+    }
+    QComboBox {
+        font-size: 16px;
+    }
+    QTableWidget {
+        font-size: 16px;
     }
     QMenuBar {
         background-color: white;
@@ -143,6 +168,7 @@ MAIN_WINDOW_STYLE = """
         background-color: #e9ecef;
         color: #495057;
         border-top: 1px solid #dee2e6;
+        font-size: 14px;
         font-family:  'Arial', sans-serif;
         padding: 4px;
     }
@@ -175,25 +201,26 @@ CHAT_WINDOW_STYLE = """
         background-color: #fafafa;
     }
     QPushButton#send_btn {
-        background-color: #007bff;
-        color: white;
-        border: none;
-        border-radius: 20px;
-        padding: 14px 28px;
-        font-size: 18px;
-        font-weight: 600;
-        font-family: 'System UI', Arial, sans-serif;
+        background-color: #f8f9fa;
+        color: black;
+        border: 1px outset #898b8c;
+        border-radius: 6px;
+        padding: 8px 18px;
+        font-size: 16px;
+        font-weight: 500;
+        font-family: 'System-UI', 'Segoe UI', Arial, sans-serif;
         min-width: 100px;
     }
     QPushButton#send_btn:hover {
-        background-color: #0056b3;
+        background-color: #c3c3c3;
     }
     QPushButton#send_btn:pressed {
-        background-color: #004085;
+        background-color: #46f6070;
+        border: none;
     }
     QPushButton#send_btn:disabled {
-        background-color: #6c757d;
-        color: #adb5bd;
+        background-color: #f8f9fa;
+        color: #525354;
     }
 """
 
@@ -220,15 +247,19 @@ USERS_PANEL_STYLE = """
         border-radius: 6px;
     }
     QPushButton {
-        background-color: #6c757d;
-        color: white;
-        border: none;
+        background-color: #f8f9fa;
+        color: black;
+        border: 1px outset #898b8c;
         border-radius: 6px;
         padding: 8px 16px;
         font-size: 18px;
         font-family: Arial, sans-serif;
     }
     QPushButton:hover {
-        background-color: #5a6268;
+        background-color: #c3c3c3;
+    }
+    QPushButton:pressed {
+        background-color: #46f6070;
+        border: none;
     }
 """
