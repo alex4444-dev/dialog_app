@@ -1250,7 +1250,7 @@ class P2PMainWindow(QMainWindow):
                 self.users_panel.update_users(peers_data, contacts)
     
             # Обновляем статус сети
-            connected_count = len([p for p in peers_data if p.get('status') == 'connected'])
+            connected_count = sum(1 for p in peers_data if p.get('status') != 'offline')
             is_connected = connected_count > 0 or len(peers_data) > 0
             self.update_network_status(is_connected, connected_count)
         
