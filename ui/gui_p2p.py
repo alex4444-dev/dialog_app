@@ -2104,7 +2104,7 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
-            #self.sound_manager.play('incoming_call')
+            self.sound_manager.play('incoming_call')
             
             # Создаём окно видеозвонка 
             video_window = VideoCallWindow(
@@ -2454,16 +2454,16 @@ class P2PDialogApplication:
     def connect_to_p2p_network(self):
         """Подключение к P2P сети в фоновом режиме"""
         def connect_thread():
-            logger.info("Попытка подключения к P2P сети...")
-            self.auth_window.update_status("Подключение к P2P сети...")
+            logger.info("Попытка подключения к сети...")
+            self.auth_window.update_status("Подключение к сети...")
             
             if self.p2p_client and self.p2p_client.start():
-                logger.info("Успешное подключение к P2P сети")
-                self.auth_window.update_status("✅ Подключено к P2P сети")
+                logger.info("Успешное подключение к сети")
+                self.auth_window.update_status("✅ Сеть подключена")
             else:
-                logger.error("Не удалось подключиться к P2P сети")
-                self.auth_window.update_status("❌ Ошибка подключения к P2P сети")
-                QMessageBox.warning(self.auth_window, 'Ошибка', 'Не удалось подключиться к P2P сети')
+                logger.error("Не удалось подключиться к сети")
+                self.auth_window.update_status("❌ Ошибка подключения")
+                QMessageBox.warning(self.auth_window, 'Ошибка', 'Не удалось подключиться к сети')
         
         threading.Thread(target=connect_thread, daemon=True).start()
         

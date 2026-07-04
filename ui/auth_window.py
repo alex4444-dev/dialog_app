@@ -32,11 +32,7 @@ class RegistrationWindow(QDialog):
         title.setAlignment(Qt.AlignCenter)
         layout.addWidget(title)
         
-        # Подзаголовок
-        subtitle = QLabel("Присоединяйтесь к нашему сообществу")
-        subtitle.setAlignment(Qt.AlignCenter)
-        subtitle.setStyleSheet("font-size: 16px; color: rgba(255,255,255,0.8); margin-bottom: 20px;")
-        layout.addWidget(subtitle)
+        
         
         # Форма регистрации
         form_layout = QFormLayout()

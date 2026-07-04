@@ -2329,8 +2329,8 @@ class P2PNetworkClient(QObject):
                 self.connected_peers[peer_id]['username'] = username
                 self.connected_peers[peer_id]['last_seen'] = time.time()
                 logger.info(f"👤 Пользователь {username} в сети (пир {peer_id})")        
-                # Через пару секунд пробуем установить WebRTC (чтобы не мешать основному обмену)
-                threading.Timer(2.0, self.initiate_webrtc_with_signal, args=(peer_id, self.connected_peers[peer_id])).start()
+                # Через пару секунд пробуем установить WebRTC (передаем только имя)
+                threading.Timer(2.0, self.initiate_webrtc_with_signal, args=(self.username,)).start()
                 online_users = self.get_online_users()
                 self.user_list_updated.emit(online_users)
                 logger.info(f"📊 Обновлен список пользователей: {len(online_users)} пользователей онлайн")
