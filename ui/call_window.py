@@ -28,7 +28,7 @@ class CallWindow(QWidget):
     call_started = pyqtSignal(str)
     connection_established = pyqtSignal()
     
-    def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None, input_device=None, output_device=None):
+    def __init__(self, username, call_type, call_id, is_outgoing=True, parent=None, input_device=None, output_device=None, sound_manager=None):
         super().__init__(parent)
         self.username = username
         self.call_type = call_type
@@ -37,6 +37,7 @@ class CallWindow(QWidget):
         self.socket_set = False
         self.input_device = input_device   # теперь сохраняем переданные устройства
         self.output_device = output_device
+        self.sound_manager = sound_manager
         self._recv_buffer = b''   # буфер для приёма данных
 
         logger.info(f"🔊 CallWindow.__init__: Создание окна для {username}, тип: {call_type}, исходящий: {is_outgoing}")
@@ -385,6 +386,8 @@ class CallWindow(QWidget):
            
     def accept_call(self):
         try:
+            if self.sound_manager:
+                self.sound_manager.stop_looped()
             self.accept_button.hide()
             self.reject_button.hide()
             self.active_buttons_widget.show()
@@ -415,12 +418,16 @@ class CallWindow(QWidget):
 
     def reject_call(self):
         """Отклонить входящий звонок"""
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         logger.info(f"🔊 Отклонение звонка {self.call_id}")
         self.call_rejected.emit(self.call_id)
         self.close()
     
     def end_call(self):
         """Завершить активный звонок"""
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         self.call_ended.emit(self.call_id)
         self.close()
     
@@ -1093,6 +1100,8 @@ class CallWindow(QWidget):
     def closeEvent(self, event):
         """Обработка закрытия окна"""
         try:
+            if self.sound_manager:
+                self.sound_manager.stop_looped()
             self.is_active = False
             self.audio_receiver_running = False   # сигнал остановки потока
             self.duration_timer.stop()

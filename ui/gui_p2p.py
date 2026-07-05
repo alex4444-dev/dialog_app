@@ -1534,6 +1534,7 @@ class P2PMainWindow(QMainWindow):
 
     def accept_call(self, call_id):
         try:
+            self.sound_manager.stop_looped()
             if call_id not in self.active_calls:
                 return
             call_info = self.active_calls[call_id]
@@ -1561,7 +1562,7 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"=== ОТКЛОНЕНИЕ ЗВОНКА {call_id} ===") 
 
-
+            self.sound_manager.stop_looped()
             if call_id not in self.active_calls:
                 logger.error(f"❌ Звонок {call_id} не найден в active_calls")
                 return
@@ -1589,6 +1590,7 @@ class P2PMainWindow(QMainWindow):
 
     def end_call(self, call_id):
         logger.info(f"=== ЗАВЕРШЕНИЕ ЗВОНКА {call_id} ===")
+        self.sound_manager.stop_looped()
         with self.calls_lock:
             if call_id not in self.active_calls:
                 logger.warning(f"Звонок {call_id} уже завершен или не существует")
@@ -2018,10 +2020,11 @@ class P2PMainWindow(QMainWindow):
                 return
 
             # Создаем окно звонка
-            self.sound_manager.play('incoming_call')
+            self.sound_manager.play_looped('incoming_call')
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self,
                                         input_device=self.audio_input_device,
-                                        output_device=self.audio_output_device)
+                                        output_device=self.audio_output_device,
+                                        sound_manager=self.sound_manager)
             call_window.call_ended.connect(self.end_call)
             call_window.call_accepted.connect(self.accept_call)
             call_window.call_rejected.connect(self.reject_call)
@@ -2104,7 +2107,7 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
-            self.sound_manager.play('incoming_call')
+            self.sound_manager.play_looped('incoming_call')
             
             # Создаём окно видеозвонка 
             video_window = VideoCallWindow(
@@ -2115,7 +2118,8 @@ class P2PMainWindow(QMainWindow):
                 quality=quality,
                 color_enhancement=color_enhancement,
                 input_device=self.audio_input_device,
-                output_device=self.audio_output_device
+                output_device=self.audio_output_device,
+                sound_manager=self.sound_manager
             )
             
             
