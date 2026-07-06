@@ -26,10 +26,19 @@ class SoundManager(QObject):
             'file_received': self.settings.value('sound_file_received', 'file_received.wav', type=str)
         }
 
+
         self.player = QMediaPlayer()
+        self.player.error.connect(self._on_player_error)
         self.loop_player = QMediaPlayer()
+        self.loop_player.error.connect(self._on_loop_player_error)
         self.loop_player.mediaStatusChanged.connect(self._on_loop_status_changed)
         self._loop_sound_name = None
+
+    def _on_player_error(self, error):
+        logger.error(f"Ошибка QMediaPlayer (обычный): {error} - {self.player.errorString()}")
+
+    def _on_loop_player_error(self, error):
+        logger.error(f"Ошибка QMediaPlayer (зацикленный): {error} - {self.loop_player.errorString()}")
 
     def _resolve_path(self, sound_name):
         filename = self.sounds.get(sound_name)
@@ -62,6 +71,8 @@ class SoundManager(QObject):
             return
         url = self._get_sound_url(sound_name)
         if url:
+            if self.player.state() == QMediaPlayer.PlayingState:
+                self.player.stop()
             self.player.setMedia(QMediaContent(url))
             self.player.play()
 
@@ -80,6 +91,18 @@ class SoundManager(QObject):
             self.loop_player.stop()
         self._loop_sound_name = None
 
+    def stop(self):
+        """Остановить всё текущее воспроизведение (и циклы, и одиночные звуки)."""
+        # Останавливаем зацикленное воспроизведение, если активно
+        self.stop_looped()
+        # Останавливаем все звуковые потоки device
+        try:
+            if self.player.state() == QMediaPlayer.PlayingState:
+                self.player.stop()
+            logger.info("Воспроизведение остановлено по запросу")
+        except Exception as e:
+            logger.error(f"Ошибка при остановке звука: {e}")
+
     def _on_loop_status_changed(self, status):
         if status == QMediaPlayer.EndOfMedia and self._loop_sound_name is not None:
             self.loop_player.play()
@@ -95,3 +118,5 @@ class SoundManager(QObject):
         self.sounds[sound_name] = filename
         self.settings.setValue(f'sound_{sound_name}', filename)
         self.settings.sync()
+
+   

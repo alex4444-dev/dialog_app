@@ -945,7 +945,7 @@ class P2PMainWindow(QMainWindow):
             widget = self.tabs.widget(i)
             if hasattr(widget, 'username') and widget.username == username:
                 unread_text = f" ({unread_count}📩)" if unread_count > 0 else ""
-                self.tabs.setTabText(i, f"💬 {username}{unread_text}")
+                self.tabs.setTabText(i, f"💬 {username} {unread_text}")
                 break
         
     def on_message_sent(self, username, message):
@@ -1532,6 +1532,8 @@ class P2PMainWindow(QMainWindow):
 
     def accept_call(self, call_id):
         try:
+            if self.sound_manager:
+                self.sound_manager.stop()
             if call_id not in self.active_calls:
                 return
             call_info = self.active_calls[call_id]
@@ -1559,6 +1561,7 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"=== ОТКЛОНЕНИЕ ЗВОНКА {call_id} ===") 
 
+            self.sound_manager.stop()
 
             if call_id not in self.active_calls:
                 logger.error(f"❌ Звонок {call_id} не найден в active_calls")
@@ -1587,6 +1590,7 @@ class P2PMainWindow(QMainWindow):
 
     def end_call(self, call_id):
         logger.info(f"=== ЗАВЕРШЕНИЕ ЗВОНКА {call_id} ===")
+        self.sound_manager.stop()
         with self.calls_lock:
             if call_id not in self.active_calls:
                 logger.warning(f"Звонок {call_id} уже завершен или не существует")
@@ -2019,7 +2023,8 @@ class P2PMainWindow(QMainWindow):
             self.sound_manager.play('incoming_call')
             call_window = CallWindow(from_user, call_type, call_id, is_outgoing=False, parent=self,
                                         input_device=self.audio_input_device,
-                                        output_device=self.audio_output_device)
+                                        output_device=self.audio_output_device,
+                                        sound_manager=self.sound_manager)
             call_window.call_ended.connect(self.end_call)
             call_window.call_accepted.connect(self.accept_call)
             call_window.call_rejected.connect(self.reject_call)
@@ -2102,9 +2107,10 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
-            self.sound_manager.play('incoming_call')
+            
             
             # Создаём окно видеозвонка 
+            self.sound_manager.play('incoming_call')
             video_window = VideoCallWindow(
                 from_user, call_id, is_outgoing=False, parent=self,
                 camera_index=camera_index,
@@ -2113,7 +2119,8 @@ class P2PMainWindow(QMainWindow):
                 quality=quality,
                 color_enhancement=color_enhancement,
                 input_device=self.audio_input_device,
-                output_device=self.audio_output_device
+                output_device=self.audio_output_device,
+                #sound_manager=self.sound_manager
             )
             
             
@@ -2146,7 +2153,7 @@ class P2PMainWindow(QMainWindow):
             video_window.activateWindow()
             
 
-            # Функция для подключения видео (как было раньше)
+            # Функция для подключения видео
             def try_connect_video(attempt=0):
                 if attempt >= 30:
                     logger.error(f"❌ Не удалось подключиться к видео после 30 попыток")
@@ -2224,10 +2231,10 @@ class P2PMainWindow(QMainWindow):
         if not call_id:
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на видеозвонок')
             return
-
-        self.sound_manager.play('outgoing_call')
+     
 
         # Создаём окно видеозвонка
+        self.sound_manager.play('outgoing_call')
         video_window = VideoCallWindow(
             username, call_id, is_outgoing=True, parent=self,
             camera_index=camera_index,
@@ -2417,6 +2424,7 @@ class P2PMainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """Обработчик закрытия окна"""
+        self.sound_manager.stop()
         self.disconnect_from_network()
         if self.tray_icon and self.tray_icon.isVisible():
             self.tray_icon.hide()

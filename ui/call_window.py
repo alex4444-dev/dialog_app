@@ -387,7 +387,7 @@ class CallWindow(QWidget):
     def accept_call(self):
         try:
             if self.sound_manager:
-                self.sound_manager.stop_looped()
+                self.sound_manager.stop()
             self.accept_button.hide()
             self.reject_button.hide()
             self.active_buttons_widget.show()
@@ -419,7 +419,7 @@ class CallWindow(QWidget):
     def reject_call(self):
         """Отклонить входящий звонок"""
         if self.sound_manager:
-            self.sound_manager.stop_looped()
+            self.sound_manager.stop()
         logger.info(f"🔊 Отклонение звонка {self.call_id}")
         self.call_rejected.emit(self.call_id)
         self.close()
@@ -427,7 +427,7 @@ class CallWindow(QWidget):
     def end_call(self):
         """Завершить активный звонок"""
         if self.sound_manager:
-            self.sound_manager.stop_looped()
+            self.sound_manager.stop()
         self.call_ended.emit(self.call_id)
         self.close()
     
@@ -1101,7 +1101,7 @@ class CallWindow(QWidget):
         """Обработка закрытия окна"""
         try:
             if self.sound_manager:
-                self.sound_manager.stop_looped()
+                self.sound_manager.stop()
             self.is_active = False
             self.audio_receiver_running = False   # сигнал остановки потока
             self.duration_timer.stop()

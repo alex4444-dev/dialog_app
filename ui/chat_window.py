@@ -114,7 +114,6 @@ class ChatWindow(QWidget):
         # Подавляем дальнейшую обработку
         self.chat_history.setSource(QUrl())  # сброс
 
-    # ========== Остальные методы без изменений ==========
     
     def check_methods(self):
         required_methods = ['send_message', 'add_message', 'set_active', 
