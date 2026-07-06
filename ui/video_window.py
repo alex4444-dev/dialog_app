@@ -348,11 +348,12 @@ class VideoCallWindow(QWidget):
     
     def __init__(self, username, call_id, is_outgoing=True, parent=None,
                  camera_index=0, resolution=(320,240), fps=15, quality=60, color_enhancement=True,
-                 input_device=None, output_device=None):
+                 input_device=None, output_device=None, sound_manager=None):
         super().__init__(parent)
         self.username = username
         self.call_id = call_id
         self.is_outgoing = is_outgoing
+        self.sound_manager = sound_manager
         self._is_closing = False
 
         # Вместо аудио-окна создаём ядро аудио
@@ -981,6 +982,8 @@ class VideoCallWindow(QWidget):
 
     def accept_call(self):
         """Принять видеозвонок"""
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         self.call_accepted.emit(self.call_id)
         self.status_label.setText("✅ Видеозвонок принят")
         self.start_call()
@@ -1016,10 +1019,14 @@ class VideoCallWindow(QWidget):
            
     def reject_call(self):
         """Отклонить видеозвонок"""
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         self.call_rejected.emit(self.call_id)
         self.end_call()
         
     def end_call(self):
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         self._is_closing = True
         self.stop_video_capture()
         self.audio_core.stop()
@@ -1044,6 +1051,8 @@ class VideoCallWindow(QWidget):
         self.close()
     
     def closeEvent(self, event):
+        if self.sound_manager:
+            self.sound_manager.stop_looped()
         if self._is_closing:
             event.accept()
             return

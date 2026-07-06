@@ -429,7 +429,7 @@ class P2PMainWindow(QMainWindow):
         self.system_chat.setReadOnly(True)
         system_layout.addWidget(self.system_chat)
         
-        self.tabs.addTab(system_tab, "Система")
+        self.tabs.addTab(system_tab, "📊 Система")
         
     def create_menu(self):
         """Создание меню приложения"""
@@ -944,8 +944,8 @@ class P2PMainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if hasattr(widget, 'username') and widget.username == username:
-                unread_text = f"({unread_count})" if unread_count > 0 else ""
-                self.tabs.setTabText(i, f" {username} {unread_text}")
+                unread_text = f" ({unread_count}📩)" if unread_count > 0 else ""
+                self.tabs.setTabText(i, f"💬 {username}{unread_text}")
                 break
         
     def on_message_sent(self, username, message):
@@ -1184,7 +1184,6 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"P2PMainWindow.on_unread_count_changed: Для {username} непрочитанных: {unread_count}")
             # Здесь можно обновить счетчик непрочитанных в интерфейсе
-            self.update_tab_title(username, unread_count)
         except Exception as e:
             logger.error(f"P2PMainWindow.on_unread_count_changed: Ошибка: {e}")
 
