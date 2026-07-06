@@ -10,9 +10,9 @@ from typing import List, Dict, Tuple
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QTabWidget, QAction, QMenu, 
                              QMessageBox, QStatusBar, QTextEdit, QDialog, QFileDialog,
-                             QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut)
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings
-from PyQt5.QtGui import QIcon, QKeySequence
+                             QSystemTrayIcon, QStyle, QDesktopWidget, QShortcut, QLabel, QPushButton)
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QSettings, QUrl
+from PyQt5.QtGui import QIcon, QKeySequence, QDesktopServices
 
 # Добавляем путь к текущей директории для импорта модулей
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -21,15 +21,15 @@ if current_dir not in sys.path:
 
 try:
     from network.p2p_network import P2PNetworkClient
-    from auth_window import AuthWindow
-    from users_panel import UsersPanel
-    from chat_window import ChatWindow
-    from notifications import NotificationWindow
-    from settings_window import SettingsDialog
-    from call_window import CallWindow
-    from video_window import VideoCallWindow
+    from ui.auth_window import AuthWindow
+    from ui.users_panel import UsersPanel
+    from ui.chat_window import ChatWindow
+    from ui.notifications import NotificationWindow
+    from ui.settings_window import SettingsDialog
+    from ui.call_window import CallWindow
+    from ui.video_window import VideoCallWindow
     from storage.database import ClientDatabase
-    from sound_manager import SoundManager
+    from ui.sound_manager import SoundManager
     from core.auth_manager import AuthManager
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
@@ -135,6 +135,9 @@ class P2PMainWindow(QMainWindow):
         self.users_panel.peer_connect_requested.connect(self.connect_to_peer)
         self.users_panel.peer_disconnect_requested.connect(self.disconnect_from_peer)
         
+        self.users_panel.add_contact_requested.connect(self.add_contact)
+        self.users_panel.remove_contact_requested.connect(self.remove_contact)
+        
         self.users_panel.block_user.connect(self.block_user)
         self.users_panel.unblock_user.connect(self.unblock_user)
         
@@ -211,7 +214,8 @@ class P2PMainWindow(QMainWindow):
         try:
             dialog = SettingsDialog(parent=self,
                                     input_device=self.audio_input_device,
-                                    output_device=self.audio_output_device)
+                                    output_device=self.audio_output_device,
+                                    p2p_client=self.p2p_client)
             # Подключаем сигнал для получения изменённых настроек
             dialog.settings_changed.connect(self.on_settings_changed)
             dialog.exec_()
@@ -315,7 +319,7 @@ class P2PMainWindow(QMainWindow):
                 self.p2p_client.bootstrap_nodes = net_settings['bootstrap_nodes']
             self.p2p_client.start()
             self.system_chat.append("🌐 Сеть перезапущена с новыми параметрами")
-
+   
     def focus_message_input(self):
         """Переключает фокус на поле ввода активной вкладки чата"""
         current_tab = self.tabs.currentWidget()
@@ -393,7 +397,7 @@ class P2PMainWindow(QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = QSystemTrayIcon(self)
             self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            self.tray_icon.setToolTip("Диалог - P2P Мессенджер")
+            self.tray_icon.setToolTip("Диалог - Коммуникационная платформа")
             
             # Создаем контекстное меню для трея
             tray_menu = QMenu()
@@ -425,7 +429,7 @@ class P2PMainWindow(QMainWindow):
         self.system_chat.setReadOnly(True)
         system_layout.addWidget(self.system_chat)
         
-        self.tabs.addTab(system_tab, "📊 Система")
+        self.tabs.addTab(system_tab, "Система")
         
     def create_menu(self):
         """Создание меню приложения"""
@@ -435,16 +439,12 @@ class P2PMainWindow(QMainWindow):
             QMenu { font-size: 16px; font-weight:bold; }
         """)
         
-        # Меню файл
-        file_menu = menubar.addMenu('Система')
+        # Меню сервис
+        file_menu = menubar.addMenu('Сервис')
 
         refresh_action = QAction('🔄 Обновить список пользователей', self)
         refresh_action.triggered.connect(self.refresh_user_list)
         file_menu.addAction(refresh_action)
-        
-        # Добавляем действие диагностики
-        debug_action = QAction('🔍 Диагностика сети', self)
-        file_menu.addAction(debug_action)
         
         file_menu.addSeparator()
         
@@ -453,7 +453,7 @@ class P2PMainWindow(QMainWindow):
         add_peer_action.triggered.connect(self.show_add_peer_dialog)
         file_menu.addAction(add_peer_action)
 
-        # В меню Файл добавьте:
+        # В меню Сервис добавьте:
         force_connect_action = QAction('🔗 Принудительно подключиться к пирам', self)
         force_connect_action.triggered.connect(self.force_connect_peers)
         file_menu.addAction(force_connect_action)
@@ -474,11 +474,6 @@ class P2PMainWindow(QMainWindow):
         notifications_menu.addAction(self.enable_notifications_action)
         
         file_menu.addSeparator()
-        
-        # Выход из системы
-        logout_action = QAction('🚪 Выйти из системы', self)
-        logout_action.triggered.connect(self.logout)
-        file_menu.addAction(logout_action)
         
         # Выход из приложения
         exit_action = QAction('❌ Выйти', self)
@@ -502,6 +497,12 @@ class P2PMainWindow(QMainWindow):
         profile_action = QAction('👤 Мой профиль', self)
         profile_action.triggered.connect(self.show_profile)
         account_menu.addAction(profile_action)
+
+        # Меню 'О программе'
+        about_menu = menubar.addMenu('Справка')
+        about_action = QAction('ℹ️ О программе', self)
+        about_action.triggered.connect(self.show_about_dialog)
+        about_menu.addAction(about_action)
 
     def setup_p2p_integration(self):
         """Интеграция с P2P сетью - безопасная версия"""
@@ -750,6 +751,7 @@ class P2PMainWindow(QMainWindow):
         logger.info(f"MainWindow.handle_call: Обработка звонка: {action} от {from_user}, тип: {call_type}, ID: {call_id}")
 
         if action == 'incoming_call':
+            self.add_system_message_to_chat(from_user, f"📞 Входящий {call_type} звонок...")
             if call_type == 'video':
                 self.handle_incoming_video_call(from_user, call_id)
             else:
@@ -760,12 +762,15 @@ class P2PMainWindow(QMainWindow):
             logger.debug(f"Игнорируем outgoing_call для {call_id}")
                 
         elif action == 'call_accepted':
+            self.add_system_message_to_chat(from_user, f"✅ Звонок принят")
             self.handle_call_accepted(from_user, call_id)
             
         elif action == 'call_rejected':
+            self.add_system_message_to_chat(from_user, f"❌ Звонок отклонён")
             self.handle_call_rejected(from_user, call_id)
             
         elif action == 'call_ended':
+            self.add_system_message_to_chat(from_user, f"📞 Звонок завершён")
             self.handle_call_ended(from_user, call_id)
 
         elif action == 'media_info':
@@ -824,7 +829,7 @@ class P2PMainWindow(QMainWindow):
 
             # Очищаем имя от возможных лишних символов
             clean_username = username.replace("👤 ", "").replace("💬 ", "").strip()
-
+            
             # КЛЮЧ – ТОЛЬКО ИМЯ ПОЛЬЗОВАТЕЛЯ, без IP:порта
             user_key = clean_username
 
@@ -841,12 +846,38 @@ class P2PMainWindow(QMainWindow):
             # Создаём новый чат (host и port передаются только для информации, если нужны)
             logger.info(f"P2PMainWindow.open_chat: Создание нового чата с {clean_username}")
             chat_window = ChatWindow(clean_username, host, port)
+            chat_window.message_deleted.connect(self.on_message_deleted)
 
+            # Загрузка истории сообщений
+            messages = self.db.get_user_messages(self.username, clean_username, limit=200)
+            for msg in messages:
+                is_own = (msg['from_user'] == self.username)
+                if msg['from_user'] == 'system':
+                    # Это системное сообщение
+                    # Проверяем, содержит ли оно маркер файла
+                    if msg['message'].startswith("📥 Получен файл:") or msg['message'].startswith("📤 Отправлен файл:"):
+                        # Извлекаем имя файла из сообщения (можно парсить)
+                        # Проще: хранить отдельно путь, но для простоты используем регулярку
+                        import re
+                        match = re.search(r'файл:\s*([^)]+)', msg['message'])
+                        if match:
+                            file_name = match.group(1).strip()
+                            # Путь не хранится в сообщении, поэтому ссылку не сделаем, просто покажем текст
+                            chat_window.add_system_message(msg['message'])
+                        else:
+                            chat_window.add_system_message(msg['message'])
+                    else:
+                        chat_window.add_system_message(msg['message'])
+                else:
+                    chat_window.add_message(msg['from_user'], msg['message'], is_own=is_own, message_id=msg.get('message_id'))
+                
             # Подключаем сигналы
             chat_window.message_sent.connect(self.on_message_sent)
             chat_window.unread_count_changed.connect(self.on_unread_count_changed)
             chat_window.call_requested.connect(self.on_call_requested)
             chat_window.file_sent.connect(self.on_file_sent)
+            chat_window.message_deleted.connect(self.on_message_deleted)
+            chat_window.clear_all_messages_requested.connect(self.on_clear_all_messages)
 
             # Добавляем вкладку
             tab_index = self.tabs.addTab(chat_window, f"💬 {clean_username}")
@@ -913,14 +944,17 @@ class P2PMainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if hasattr(widget, 'username') and widget.username == username:
-                unread_text = f" ({unread_count}📩)" if unread_count > 0 else ""
-                self.tabs.setTabText(i, f"💬 {username}{unread_text}")
+                unread_text = f"({unread_count})" if unread_count > 0 else ""
+                self.tabs.setTabText(i, f" {username} {unread_text}")
                 break
         
     def on_message_sent(self, username, message):
         """Обработчик отправки сообщения из чата"""
         try:
             logger.info(f"P2PMainWindow.on_message_sent: Отправка сообщения для {username}: {message}")
+            # Сохраняем сообщение в БД
+            self.db.store_message(self.username, username, message)
+            
             # Вызываем метод отправки сообщения из P2P клиента
             if hasattr(self, 'p2p_client') and self.p2p_client:
                 self.p2p_client.send_message(username, message)
@@ -928,6 +962,83 @@ class P2PMainWindow(QMainWindow):
                 logger.error("P2PMainWindow.on_message_sent: P2P клиент не доступен")
         except Exception as e:
             logger.error(f"P2PMainWindow.on_message_sent: Ошибка отправки сообщения: {e}")
+
+    def on_message_deleted(self, username, message_id):
+        """Удаляет одно сообщение из БД и перезагружает историю чата."""
+        if message_id == "__refresh__":
+            return
+
+        if not self.db or not message_id:
+            logger.warning(f"on_message_deleted: нет БД или message_id={message_id}")
+            return
+
+        # 1. Удаляем из БД
+        conn = self.db._get_connection()
+        try:
+            conn.execute("DELETE FROM messages WHERE message_id = ?", (message_id,))
+            conn.commit()
+            logger.info(f"✅ Сообщение {message_id} удалено из БД")
+        except Exception as e:
+            logger.error(f"Ошибка удаления сообщения {message_id}: {e}")
+            return
+        finally:
+            conn.close()
+
+        # 2. Перезагружаем историю для этого чата
+        if username in self.chat_windows:
+            chat_window = self.chat_windows[username]
+
+            # ОЧИЩАЕМ СТАРЫЙ СЛОВАРЬ ИНДЕКСОВ
+            chat_window.message_ids.clear()
+
+            # Очищаем виджет
+            chat_window.chat_history.clear()
+
+            # Загружаем заново из БД
+            messages = self.db.get_user_messages(self.username, username, limit=200)
+
+            for msg in messages:
+                is_own = (msg['from_user'] == self.username)
+                if msg['from_user'] == 'system':
+                    chat_window.add_system_message(msg['message'])
+                else:
+                    # ВАЖНО: передаём message_id, чтобы словарь заполнился правильными индексами
+                    chat_window.add_message(
+                        msg['from_user'],
+                        msg['message'],
+                        is_own=is_own,
+                        message_id=msg.get('message_id')
+                    )
+
+            logger.info(f"История чата с {username} перезагружена после удаления")
+        else:
+            logger.warning(f"Чат с {username} не найден, обновление невозможно")
+
+    def on_clear_all_messages(self, username):
+        """Удалить все сообщения с пользователем из БД и очистить чат."""
+        reply = QMessageBox.question(
+            self,
+            "Удаление всех сообщений",
+            f"Вы уверены, что хотите удалить все сообщения с {username}?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
+            # Удаляем из БД
+            conn = self.db._get_connection()
+            try:
+                conn.execute(
+                    "DELETE FROM messages WHERE (from_user = ? AND to_user = ?) OR (from_user = ? AND to_user = ?)",
+                    (self.username, username, username, self.username)
+                )
+                conn.commit()
+            finally:
+                conn.close()
+            # Очищаем интерфейс чата
+            if username in self.chat_windows:
+                chat_window = self.chat_windows[username]
+                chat_window.clear_chat()
+                # Добавляем системное сообщение об очистке
+                chat_window.add_system_message("История сообщений очищена")
 
     def get_call_socket(self, call_id):
         """Получить сокет для звонка по его ID"""
@@ -1073,6 +1184,7 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"P2PMainWindow.on_unread_count_changed: Для {username} непрочитанных: {unread_count}")
             # Здесь можно обновить счетчик непрочитанных в интерфейсе
+            self.update_tab_title(username, unread_count)
         except Exception as e:
             logger.error(f"P2PMainWindow.on_unread_count_changed: Ошибка: {e}")
 
@@ -1094,32 +1206,19 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"P2PMainWindow.on_call_requested: Ошибка запроса звонка: {e}")
 
     def update_peers_from_p2p(self):
-        """Обновление информации о пирах - работаем напрямую с P2PNetworkClient"""
+        """Обновление списка пользователей из P2P клиента"""
         try:
-            peers_data = []
-            
-            # Проверяем доступность P2P клиента
             if not hasattr(self, 'p2p_client') or self.p2p_client is None:
                 return
-            
-            p2p_client = self.p2p_client
-        
-            # Получаем подключенные пиры (исключая bootstrap)
-            connected_peers = []
-            if hasattr(p2p_client, 'connected_peers'):
-                try:
-                    connected_peers = list(p2p_client.connected_peers)
-                    # Фильтруем bootstrap узлы
-                    connected_peers = [
-                        peer for peer in connected_peers 
-                        if not self._is_bootstrap_peer(peer, p2p_client)
-                    ]
-                except Exception as e:
-                    self.logger.warning(f"Ошибка получения connected_peers: {e}")
-            
+            online_users = self.p2p_client.get_online_users()
+            if online_users:
+                self.logger.info(f"update_peers_from_p2p: получено {len(online_users)} пользователей")
+            else:
+                self.logger.debug("update_peers_from_p2p: список пользователей пуст")
+            self.update_user_list(online_users)
         except Exception as e:
-            self.logger.error(f"Ошибка получения информации о пирах: {e}")
-
+            self.logger.error(f"Ошибка обновления пиров: {e}")
+    
     def _is_bootstrap_peer(self, peer, p2p_client):
         try:
             if isinstance(peer, str):
@@ -1146,10 +1245,11 @@ class P2PMainWindow(QMainWindow):
     
             # Обновляем панель пользователей
             if hasattr(self, 'users_panel'):
-                self.users_panel.update_users(peers_data)
+                contacts = self.get_contacts()
+                self.users_panel.update_users(peers_data, contacts)
     
             # Обновляем статус сети
-            connected_count = len([p for p in peers_data if p.get('status') == 'connected'])
+            connected_count = sum(1 for p in peers_data if p.get('status') != 'offline')
             is_connected = connected_count > 0 or len(peers_data) > 0
             self.update_network_status(is_connected, connected_count)
         
@@ -1220,44 +1320,62 @@ class P2PMainWindow(QMainWindow):
             return {'status': f'Error: {e}'}
   
     def connect_to_peer(self, host: str, port: int):
-        """Подключиться к пиру"""
+        """Подключиться к пиру вручную"""
         try:
             self.logger.info(f"Подключение к пиру {host}:{port}")
-        
-            # Используем метод P2PNetwork для подключения
-            if hasattr(self.p2p_client, 'network') and hasattr(self.p2p_client.network, 'connect_to_peer'):
-                success = self.p2p_client.network.connect_to_peer_sync(host, port)
-                if success:
-                    self.logger.info(f"✅ Подключение к {host}:{port} выполнено")
-                    # Обновляем список пиров через короткое время
-                    QTimer.singleShot(1000, self.update_peers_from_p2p)
-                else:
-                    self.logger.error(f"❌ Не удалось подключиться к {host}:{port}")
+            # Используем прямой метод P2PNetworkClient
+            if hasattr(self.p2p_client, '_connect_to_peer'):
+                # Запускаем в отдельном потоке, чтобы не блокировать GUI
+                threading.Thread(
+                    target=self.p2p_client._connect_to_peer,
+                    args=(host, port),
+                    daemon=True
+                ).start()
+                self.system_chat.append(f"🔗 Попытка подключения к {host}:{port}...")
             else:
-                self.logger.error(f"⚠️ Метод подключения к пирам не доступен")
-            
+                self.logger.error("❌ Метод _connect_to_peer не найден")
+                self.system_chat.append("❌ Ошибка: метод подключения не доступен")
         except Exception as e:
             self.logger.error(f"Ошибка подключения к пиру: {e}")
-            self.system_chat.append(f"❌ Ошибка подключения к сети: {e}")
-  
+            self.system_chat.append(f"❌ Ошибка подключения: {e}")
+
     def disconnect_from_peer(self, host: str, port: int):
         """Отключиться от пира"""
         try:
             self.logger.info(f"Отключение от пира {host}:{port}")
-        
-            if hasattr(self.p2p_client, 'network') and hasattr(self.p2p_client.network, 'disconnect_from_peer'):
-                success = self.p2p_client.network.disconnect_from_peer_sync(host, port)
-                if success:
-                    self.system_chat.append(f"✅ Отключение от {host}:{port} выполнено")
-                    self.update_peers_from_p2p()
-                else:
-                    self.system_chat.append(f"❌ Не удалось отключиться от {host}:{port}")
+            # Ищем пира в connected_peers и закрываем сокет
+            peer_key = f"{host}:{port}"
+            if peer_key in self.p2p_client.connected_peers:
+                self.p2p_client._handle_peer_disconnection(peer_key)
+                self.system_chat.append(f"✅ Отключение от {host}:{port} выполнено")
             else:
-                self.system_chat.append(f"⚠️ Метод отключения от пиров не доступен")
-            
+                self.system_chat.append(f"⚠️ Пир {host}:{port} не найден в подключенных")
         except Exception as e:
             self.logger.error(f"Ошибка отключения от пира: {e}")
             self.system_chat.append(f"❌ Ошибка отключения: {e}")
+
+    def get_contacts(self):
+        """Возвращает список имён контактов из БД"""
+        if self.db:
+            return self.db.get_all_contacts()
+        return []    
+
+    def add_contact(self, username: str):
+        """Добавить пользователя в список контактов"""
+        if self.db.add_contact(username):
+            self.system_chat.append(f"➕ Пользователь {username} добавлен в друзья")
+            # Запускаем поиск через DHT для этого контакта
+            if self.p2p_client and self.p2p_client.dht and self.p2p_client.dht.is_running:
+                self.p2p_client._auto_connect_to_known_peers()
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось добавить {username} в друзья")
+
+    def remove_contact(self, username: str):
+        """Удалить пользователя из списка контактов"""
+        if self.db.remove_contact(username):
+            self.system_chat.append(f"➖ Пользователь {username} удалён из друзей")
+        else:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось удалить {username} из друзей")
 
     def setup_media_for_call(self, call_id, username):
         """Настройка медиа для звонка - критически важный метод"""
@@ -1756,18 +1874,42 @@ class P2PMainWindow(QMainWindow):
             self.p2p_client.file_received.connect(self.on_file_received)
 
     def on_file_sent(self, username, file_path):
-        """Вызывается, когда пользователь выбрал файл в окне чата"""
         if self.p2p_client:
+            if username in self.chat_windows:
+                chat_window = self.chat_windows[username]
+                file_name = os.path.basename(file_path)
+                chat_window.add_file_notification(file_name, file_path, is_sent=True)
             self.p2p_client.send_file(username, file_path)
         else:
-            QMessageBox.warning(self, "Ошибка", "P2P клиент не инициализирован")
+            QMessageBox.warning(self, "Ошибка", "Клиент не инициализирован")
 
     def on_file_received(self, from_user, save_path):
-        """Обработка получения файла от другого пользователя"""
         self.sound_manager.play('file_received')
         self.system_chat.append(f"📁 Получен файл от {from_user}: {os.path.basename(save_path)}")
+        
+        # Открываем чат, если он ещё не открыт
+        if from_user not in self.chat_windows:
+            self.open_chat(from_user)
+            # После открытия чата добавляем уведомление о файле (оно добавится в историю)
+        
+        # Теперь чат гарантированно открыт, добавляем уведомление
+        if from_user in self.chat_windows:
+            chat_window = self.chat_windows[from_user]
+            file_name = os.path.basename(save_path)
+            abs_path = os.path.abspath(save_path)
+            chat_window.add_file_notification(file_name, abs_path, is_sent=False)
+        
         self.show_notification("Файл получен", f"От {from_user}: {os.path.basename(save_path)}")
-    
+
+    def add_system_message_to_chat(self, username, message):
+        """Добавляет системное сообщение в чат с пользователем, если он открыт"""
+        if username in self.chat_windows:
+            chat_window = self.chat_windows[username]
+            chat_window.add_system_message(message)
+        else:
+            # Можно также добавить в системный лог, но не обязательно
+            self.system_chat.append(f"📢 {username}: {message}")
+
     def show_initial_network_info(self):
         """Показать начальную информацию о сети"""
         network_info = self.get_network_info()
@@ -1810,16 +1952,16 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"❌ Ошибка настройки медиа: {e}")
             return False
 
-    def update_network_status(self, is_connected: bool, peer_count: int):
+    def update_network_status(self, is_connected: bool, peer_count: int = 0):
         """Обновление статуса сети"""
         if is_connected:
-            status_text = f"✅ P2P сеть: Подключено ({peer_count} пиров)" 
+            status_text = f"✅ Сеть подключена" 
             self.statusBar().showMessage(status_text)
             # Обновляем системный чат
             if hasattr(self, 'system_chat'):
-                self.logger.info(f"🌐 Сеть: подключено {peer_count} пиров")
+                self.logger.info(f"🌐 Сеть подключена")
         else:
-            status_text = "❌ P2P сеть: Не подключено"
+            status_text = "❌ Сеть не подключена"
             self.statusBar().showMessage(status_text)
     
         # Обновляем статус в панели пользователей
@@ -1961,7 +2103,7 @@ class P2PMainWindow(QMainWindow):
             quality = settings.value('video_quality', 85, type=int)
             color_enhancement = settings.value('video_color_enhancement', True, type=bool)
 
-            #self.sound_manager.play('incoming_call')
+            self.sound_manager.play('incoming_call')
             
             # Создаём окно видеозвонка 
             video_window = VideoCallWindow(
@@ -2084,7 +2226,7 @@ class P2PMainWindow(QMainWindow):
             QMessageBox.warning(self, 'Ошибка', 'Не удалось отправить запрос на видеозвонок')
             return
 
-        #self.sound_manager.play('outgoing_call')
+        self.sound_manager.play('outgoing_call')
 
         # Создаём окно видеозвонка
         video_window = VideoCallWindow(
@@ -2227,6 +2369,53 @@ class P2PMainWindow(QMainWindow):
             self.disconnect_from_network()
             self.close()
     
+    def show_about_dialog(self):
+        """Показать диалог с информацией о программе"""
+        dialog = QDialog(self)
+        dialog.setWindowTitle("О программе")
+        dialog.setFixedSize(450, 350)
+        layout = QVBoxLayout(dialog)
+
+        # Основная информация
+        info = QLabel(
+            "<b>💬 ДИАЛОГ</b> – Коммуникационная платформа<br><br>"
+            "<b>Описание:</b> Программа для общения с людьми в сети интернет, \n используя аудио/видео звонки и текстовые сообщения<br>"
+            "<b>Автор:</b> Алексей Григорьев<br>"
+            "<b>Год выпуска:</b> 2026<br><br>"
+            "<b>Лицензия:</b> GNU GPL v3"
+        )
+        info.setAlignment(Qt.AlignLeft)
+        info.setWordWrap(True)
+        info.setStyleSheet("font-size: 16px; padding: 10px;")
+        layout.addWidget(info)
+
+        # Кнопка открытия лицензии
+        license_btn = QPushButton("📄 Лицензионное соглашение")
+        license_btn.clicked.connect(self.open_license)
+        layout.addWidget(license_btn, alignment=Qt.AlignCenter)
+        dialog.setStyleSheet(MAIN_WINDOW_STYLE)
+        dialog.exec_()
+
+    def open_license(self):
+        """Открыть файл LICENSE в системном редакторе"""
+        # Определяем базовую директорию (как в main.py)
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+        license_path = os.path.join(base_dir, 'LICENSE')
+
+        if os.path.exists(license_path):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(license_path))
+        else:
+            QMessageBox.warning(
+                self,
+                "Файл не найден",
+                "Файл LICENSE не найден в папке приложения.\n"
+                "Пожалуйста, убедитесь, что он присутствует."
+            )
+
     def closeEvent(self, event):
         """Обработчик закрытия окна"""
         self.disconnect_from_network()
@@ -2264,16 +2453,16 @@ class P2PDialogApplication:
     def connect_to_p2p_network(self):
         """Подключение к P2P сети в фоновом режиме"""
         def connect_thread():
-            logger.info("Попытка подключения к P2P сети...")
-            self.auth_window.update_status("Подключение к P2P сети...")
+            logger.info("Попытка подключения к сети...")
+            self.auth_window.update_status("Подключение к сети...")
             
             if self.p2p_client and self.p2p_client.start():
-                logger.info("Успешное подключение к P2P сети")
-                self.auth_window.update_status("✅ Подключено к P2P сети")
+                logger.info("Успешное подключение к сети")
+                self.auth_window.update_status("✅ Сеть подключена")
             else:
-                logger.error("Не удалось подключиться к P2P сети")
-                self.auth_window.update_status("❌ Ошибка подключения к P2P сети")
-                QMessageBox.warning(self.auth_window, 'Ошибка', 'Не удалось подключиться к P2P сети')
+                logger.error("Не удалось подключиться к сети")
+                self.auth_window.update_status("❌ Ошибка подключения")
+                QMessageBox.warning(self.auth_window, 'Ошибка', 'Не удалось подключиться к сети')
         
         threading.Thread(target=connect_thread, daemon=True).start()
         

@@ -10,3 +10,5 @@ psutil
 qrcode[pil]
 Pillow
 colorlog
+kademlia
+miniupnpc
