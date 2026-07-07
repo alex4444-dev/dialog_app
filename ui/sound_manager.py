@@ -46,13 +46,13 @@ class SoundManager(QObject):
             logger.warning(f"Нет имени файла для звука {sound_name}")
             return None
 
-        if os.path.isabs(filename) and os.path.exists(filename):
-            return filename
-
         local_path = os.path.join(self.base_sound_dir, filename)
         if os.path.exists(local_path):
             return local_path
-
+        
+        if os.path.isabs(filename) and os.path.exists(filename):
+            return filename
+        
         cwd_path = os.path.join(os.getcwd(), 'sounds', filename)
         if os.path.exists(cwd_path):
             return cwd_path

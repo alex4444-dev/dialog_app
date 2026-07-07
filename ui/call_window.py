@@ -14,6 +14,7 @@ import socket
 import numpy as np
 import json
 import sounddevice as sd
+from ui.dialogs import show_question_dialog
             
 
 MAX_AUDIO_PACKET_SIZE = 65536  # до 4096 сэмплов float32
@@ -1079,14 +1080,7 @@ class CallWindow(QWidget):
     def upgrade_to_video(self):
         """Обновление до видеозвонка"""
         try:
-            reply = QMessageBox.question(
-                self, 
-                'Перейти на видеозвонок',
-                'Вы хотите перейти на видеозвонок?\nЭто потребует согласия собеседника.',
-                QMessageBox.Yes | QMessageBox.No
-            )
-            
-            if reply == QMessageBox.Yes:
+            if show_question_dialog(self, 'Перейти на видеозвонок', 'Вы хотите перейти на видеозвонок?\nЭто потребует согласия собеседника.'):
                 # Закрываем текущий аудиозвонок
                 self.end_call()
                 

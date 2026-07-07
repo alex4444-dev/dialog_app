@@ -1,11 +1,13 @@
 import time
 import logging
 import re
+from ui.dialogs import show_question_dialog
 from PyQt5.QtWidgets import (QWidget, QVBoxLayout, QLabel, QTextBrowser, 
                              QLineEdit, QPushButton, QHBoxLayout, QApplication, QMenu, QMessageBox)
 from PyQt5.QtCore import Qt, pyqtSignal, QUrl
 from PyQt5.QtGui import QDesktopServices
 from ui.styles.main_style import CHAT_WINDOW_STYLE
+
 
 logger = logging.getLogger('dialog_gui')
 
@@ -139,8 +141,8 @@ class ChatWindow(QWidget):
             logger.info(f"ChatWindow.mark_as_read: Сброшено {old_unread} непрочитанных сообщений в чате с {self.username}")
         
     def update_title(self):
-        unread_text = f" ({self.unread_count}📩)" if self.unread_count > 0 else ""
-        new_title = f"💬 Чат с {self.username}{unread_text}"
+        unread_text = f" ({self.unread_count})" if self.unread_count > 0 else ""
+        new_title = f" Чат с {self.username} {unread_text}"
         self.title_label.setText(new_title)
         logger.debug(f"ChatWindow.update_title: Обновлен заголовок: {new_title}")
         
@@ -279,13 +281,7 @@ class ChatWindow(QWidget):
             return
         
         # Подтверждение
-        reply = QMessageBox.question(
-            self, "Подтверждение удаления",
-            f"Вы действительно хотите удалить это сообщение?\n\n{self.current_message_text[:100]}...",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, "Подтверждение удаления", f"Вы действительно хотите удалить это сообщение?\n\n{self.current_message_text[:100]}..."):
             self.message_deleted.emit(self.username, self.current_message_id)
             self.current_message_id = None
 

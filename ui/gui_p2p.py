@@ -31,6 +31,7 @@ try:
     from storage.database import ClientDatabase
     from ui.sound_manager import SoundManager
     from core.auth_manager import AuthManager
+    from ui.dialogs import show_question_dialog
 except ImportError as e:
     print(f"Ошибка импорта: {e}")
     print("Убедитесь, что все файлы находятся в правильной структуре папок")
@@ -292,6 +293,10 @@ class P2PMainWindow(QMainWindow):
                 self.p2p_client.settings.sync()
 
 
+        # Отключаем звуки
+        if 'sounds_enabled' in settings:
+            self.sound_manager.set_enabled(settings['sounds_enabled'])
+            
         # горячие клавиши
         if 'hotkeys' in settings:
             # Перезагружаем горячие клавиши (сначала удаляем старые)
@@ -944,8 +949,8 @@ class P2PMainWindow(QMainWindow):
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if hasattr(widget, 'username') and widget.username == username:
-                unread_text = f" ({unread_count}📩)" if unread_count > 0 else ""
-                self.tabs.setTabText(i, f"💬 {username} {unread_text}")
+                unread_text = f" ({unread_count})" if unread_count > 0 else ""
+                self.tabs.setTabText(i, f" {username} {unread_text}")
                 break
         
     def on_message_sent(self, username, message):
@@ -1016,13 +1021,7 @@ class P2PMainWindow(QMainWindow):
 
     def on_clear_all_messages(self, username):
         """Удалить все сообщения с пользователем из БД и очистить чат."""
-        reply = QMessageBox.question(
-            self,
-            "Удаление всех сообщений",
-            f"Вы уверены, что хотите удалить все сообщения с {username}?",
-            QMessageBox.Yes | QMessageBox.No
-        )
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, "Удаление всех сообщений", f"Вы уверены, что хотите удалить все сообщения с {username}?"):
             # Удаляем из БД
             conn = self.db._get_connection()
             try:
@@ -1184,6 +1183,7 @@ class P2PMainWindow(QMainWindow):
         try:
             logger.info(f"P2PMainWindow.on_unread_count_changed: Для {username} непрочитанных: {unread_count}")
             # Здесь можно обновить счетчик непрочитанных в интерфейсе
+            self.update_tab_title(username, unread_count)
         except Exception as e:
             logger.error(f"P2PMainWindow.on_unread_count_changed: Ошибка: {e}")
 
@@ -2367,11 +2367,7 @@ class P2PMainWindow(QMainWindow):
 
     def logout(self):
         """Выход из системы"""
-        reply = QMessageBox.question(self, 'Выход из системы', 
-                                   'Вы уверены, что хотите выйти из системы?',
-                                   QMessageBox.Yes | QMessageBox.No)
-        
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, 'Выход из системы', 'Вы уверены, что хотите выйти из системы?'):
             self.disconnect_from_network()
             self.close()
     

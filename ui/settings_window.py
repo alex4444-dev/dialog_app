@@ -31,6 +31,7 @@ if current_dir not in sys.path:
 
 # Импортируем стили
 try:
+    from ui.dialogs import show_question_dialog
     from styles.main_style import MAIN_WINDOW_STYLE
 except ImportError as e:
     print(f"Ошибка импорта стилей: {e}")
@@ -260,17 +261,36 @@ class GeneralSettingsPage(QWidget):
 
     def browse_sound(self, sound_name):
         file_path, _ = QFileDialog.getOpenFileName(self, "Выберите звуковой файл", "",
-                                                   "Звуковые файлы (*.wav);;Все файлы (*)")
+                                                "Звуковые файлы (*.wav);;Все файлы (*)")
         if file_path:
-            self.settings.setValue(f'sound_{sound_name}', file_path)
+            # Определяем папку sounds приложения
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            sounds_dir = os.path.join(base_dir, 'sounds')
+            os.makedirs(sounds_dir, exist_ok=True)
+
+            file_name = os.path.basename(file_path)
+            dest_path = os.path.join(sounds_dir, file_name)
+
+            # Если выбранный файл уже лежит в папке sounds, просто используем его имя
+            # Иначе копируем файл в папку sounds (перезаписываем при совпадении имён)
+            if os.path.dirname(file_path) != sounds_dir:
+                import shutil
+                shutil.copy2(file_path, dest_path)
+                logger.info(f"Звуковой файл скопирован в {dest_path}")
+
+            # Сохраняем только имя файла (относительный путь)
+            self.settings.setValue(f'sound_{sound_name}', file_name)
+            self.settings.sync()
+
+            # Обновляем отображение в поле ввода
             if sound_name == 'incoming_call':
-                self.incoming_call_path.setText(file_path)
+                self.incoming_call_path.setText(file_name)
             elif sound_name == 'outgoing_call':
-                self.outgoing_call_path.setText(file_path)
+                self.outgoing_call_path.setText(file_name)
             elif sound_name == 'message':
-                self.message_path.setText(file_path)
+                self.message_path.setText(file_name)
             elif sound_name == 'file_received':
-                self.file_received_path.setText(file_path)
+                self.file_received_path.setText(file_name)
 
     def browse_download_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Выберите папку для сохранения файлов")
@@ -309,10 +329,7 @@ class GeneralSettingsPage(QWidget):
             current = list_widget.currentItem()
             if current:
                 username = current.text()
-                reply = QMessageBox.question(dialog, "Подтверждение",
-                                            f"Разблокировать пользователя {username}?",
-                                            QMessageBox.Yes | QMessageBox.No)
-                if reply == QMessageBox.Yes:
+                if show_question_dialog(dialog, "Подтверждение", f"Разблокировать пользователя {username}?"):
                     self.main_window.unblock_user(username)
                     list_widget.takeItem(list_widget.row(current))
             else:
@@ -1057,19 +1074,13 @@ class HotkeysSettingsPage(QWidget):
             QMessageBox.information(self, "Удаление", "Сначала выберите запись.")
             return
         action = self.table.item(current_row, 0).text()
-        reply = QMessageBox.question(self, "Подтверждение",
-                                     f"Удалить горячую клавишу для действия '{action}'?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, "Подтверждение", f"Удалить горячую клавишу для действия '{action}'?"):
             del self.hotkeys[action]
             self.save_hotkeys()
             self.update_table()
 
     def reset_defaults(self):
-        reply = QMessageBox.question(self, "Сброс настроек",
-                                     "Вернуть горячие клавиши к значениям по умолчанию?",
-                                     QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, "Сброс настроек", "Вернуть горячие клавиши к значениям по умолчанию?"):
             self.load_defaults()
             self.save_hotkeys()
             self.update_table()
@@ -1334,10 +1345,7 @@ class NetworkSettingsPage(QWidget):
         if row < 0:
             QMessageBox.information(self, "Удаление", "Выберите сервер для удаления")
             return
-        reply = QMessageBox.question(self, "Подтверждение",
-                                    "Удалить выбранный ICE-сервер?",
-                                    QMessageBox.Yes | QMessageBox.No)
-        if reply == QMessageBox.Yes:
+        if show_question_dialog(self, "Подтверждение", "Удалить выбранный ICE-сервер?"):
             self.ice_servers.pop(row)
             self.update_ice_table()
             self.save_ice_servers()
