@@ -113,10 +113,16 @@ class P2PMainWindow(QMainWindow):
     
     def init_ui(self):
         """Инициализация пользовательского интерфейса"""
-        self.setWindowTitle(f'💬 ДИАЛОГ - Коммуникационная платформа (Пользователь: {self.username})')
+        self.setWindowTitle(f' ДИАЛОГ - Коммуникационная платформа (Пользователь: {self.username})')
         self.setGeometry(100, 100, 1000, 700)
         self.setStyleSheet(MAIN_WINDOW_STYLE)
-        
+
+        icon_path = self.get_icon_path()
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+        else:
+            logger.warning(f"Иконка не найдена по пути {icon_path}, используется стандартная")
+            
         # Центральный виджет
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -165,6 +171,7 @@ class P2PMainWindow(QMainWindow):
         # Создаем системный трей
         self.setup_system_tray()
         
+        self._init_default_hotkeys()
         self.setup_hotkeys()
         
         # Запускаем работу ком. платформы ДИАЛОГ с задержкой
@@ -185,8 +192,7 @@ class P2PMainWindow(QMainWindow):
                 continue
             shortcut = QShortcut(QKeySequence(shortcut_str), self)
             shortcut.setContext(Qt.ApplicationShortcut)  # Работают даже если окно не в фокусе? Лучше Qt.WindowShortcut
-            shortcut.setContext(Qt.WindowShortcut)  # Только когда окно активно
-
+            
             # Привязываем действие
             if action == "Отправить сообщение":
                 shortcut.activated.connect(self.focus_message_input)
@@ -210,6 +216,41 @@ class P2PMainWindow(QMainWindow):
         settings.endArray()
         logger.info("Горячие клавиши загружены и установлены")
 
+    def show_and_activate(self):
+        """Показывает окно, поднимает его на передний план и активирует."""
+        if self.isMinimized():
+            self.showNormal()
+        else:
+            self.show()
+        self.raise_()
+        self.activateWindow()
+    
+    def _init_default_hotkeys(self):
+        """Записывает горячие клавиши по умолчанию в QSettings, если они ещё не сохранены."""
+        settings = QSettings('DialogApp', 'P2PClient')
+        # Проверяем, есть ли уже записи
+        size = settings.beginReadArray("hotkeys")
+        settings.endArray()
+        if size == 0:
+            default_hotkeys = {
+                "Отправить сообщение": "Ctrl+Enter",
+                "Ответить на звонок": "Ctrl+Shift+A",
+                "Отклонить звонок": "Ctrl+Shift+R",
+                "Завершить звонок": "Ctrl+Shift+E",
+                "Вкл/Выкл микрофон": "Ctrl+M",
+                "Показать/скрыть окно": "Ctrl+Shift+W",
+                "Открыть настройки": "Ctrl+,",
+                "Выйти из приложения": "Ctrl+Q"
+            }
+            settings.beginWriteArray("hotkeys")
+            for i, (action, shortcut) in enumerate(default_hotkeys.items()):
+                settings.setArrayIndex(i)
+                settings.setValue("action", action)
+                settings.setValue("shortcut", shortcut)
+            settings.endArray()
+            settings.sync()
+            logger.info("Горячие клавиши по умолчанию записаны в QSettings")
+
     def show_audio_settings(self):
         """Показать окно настроек аудио"""
         try:
@@ -223,6 +264,14 @@ class P2PMainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Ошибка открытия окна настроек: {e}")
             QMessageBox.critical(self, "Ошибка", f"Не удалось открыть окно настроек:\n{e}")
+
+    def get_icon_path(self):
+        """Возвращает путь к файлу иконки приложения."""
+        if getattr(sys, 'frozen', False):
+            base_path = sys._MEIPASS
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        return os.path.join(base_path, 'dialogApp.ico')
 
     def on_settings_changed(self, settings):
         """Обновляет настройки аудио в главном окне и во всех активных звонках"""
@@ -398,32 +447,44 @@ class P2PMainWindow(QMainWindow):
             logger.error(f"❌ Ошибка финализации принятия звонка: {e}")    
         
     def setup_system_tray(self):
-        """Настройка системного трея"""
+        """Настройка системного трея с пользовательской иконкой"""
         if QSystemTrayIcon.isSystemTrayAvailable():
-            self.tray_icon = QSystemTrayIcon(self)
-            self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
-            self.tray_icon.setToolTip("Диалог - Коммуникационная платформа")
+            # Определяем путь к иконке
+            if getattr(sys, 'frozen', False):
+                base_path = sys._MEIPASS
+            else:
+                base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            icon_path = os.path.join(base_path, 'dialogApp.ico')
             
+            if os.path.exists(icon_path):
+                icon = QIcon(icon_path)
+            else:
+                # Запасной вариант — стандартная иконка
+                icon = self.style().standardIcon(QStyle.SP_ComputerIcon)
+                logger.warning(f"Иконка не найдена по пути {icon_path}, используется стандартная")
+
+            self.tray_icon = QSystemTrayIcon(self)
+            self.tray_icon.setIcon(icon)
+            self.tray_icon.setToolTip("Диалог - Коммуникационная платформа")
+
             # Создаем контекстное меню для трея
             tray_menu = QMenu()
-            
             show_action = tray_menu.addAction("Показать/Скрыть")
             show_action.triggered.connect(self.toggle_window)
-            
             tray_menu.addSeparator()
-            
             exit_action = tray_menu.addAction("Выход")
             exit_action.triggered.connect(self.close_application)
-            
             self.tray_icon.setContextMenu(tray_menu)
             self.tray_icon.activated.connect(self.tray_icon_activated)
+            # Добавьте обработку клика по системному уведомлению из трея
+            self.tray_icon.messageClicked.connect(self.show_and_activate)
             self.tray_icon.show()
             
-            logger.info("Системный трей инициализирован")
+            logger.info("Системный трей инициализирован с пользовательской иконкой")
         else:
             self.tray_icon = None
             logger.warning("Системный трей недоступен")
-            
+
     def create_system_tab(self):
         """Создание системной вкладки для сообщений"""
         system_tab = QWidget()
@@ -1974,25 +2035,35 @@ class P2PMainWindow(QMainWindow):
     def tray_icon_activated(self, reason):
         """Обработка активации иконки в трее"""
         if reason == QSystemTrayIcon.DoubleClick:
-            self.toggle_window()
+            self.toggle_window()          # переключение видимости
+        elif reason == QSystemTrayIcon.Trigger:
+            self.show_and_activate()      # всегда показывать окно
             
     def toggle_window(self):
-        """Показать/скрыть окно"""
+        """Показать/скрыть окно. При показе гарантированно поднимает на передний план."""
         if self.isVisible():
             if self.isMinimized():
                 self.showNormal()
+                # Небольшая задержка, чтобы оконный менеджер успел обработать
+                QTimer.singleShot(50, self.raise_)
+                QTimer.singleShot(50, self.activateWindow)
             else:
                 self.hide()
         else:
-            self.show()
-            self.activateWindow()
-            
+            # Окно скрыто – показываем
+            self.showNormal()
+            # Сбрасываем флаг минимизации (на всякий случай)
+            self.setWindowState(self.windowState() & ~Qt.WindowMinimized)
+            # Задержка для гарантии появления на переднем плане
+            QTimer.singleShot(50, self.raise_)
+            QTimer.singleShot(50, self.activateWindow)
+
     def show_notification(self, title, message):
         """Показать уведомление"""
         if not self.notifications_enabled:
             return
             
-        notification = NotificationWindow(title, message)
+        notification = NotificationWindow(title, message, main_window=self)
         notification.show_notification()
         self.active_notifications.append(notification)
         

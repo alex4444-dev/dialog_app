@@ -1020,6 +1020,7 @@ class HotkeysSettingsPage(QWidget):
         self.settings.endArray()
         if not self.hotkeys:
             self.load_defaults()
+            self.save_hotkeys()
         self.update_table()
 
     def load_defaults(self):

@@ -1,7 +1,8 @@
 import logging
 import os
-from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
-from PyQt5.QtCore import QUrl, QObject, QSettings, pyqtSignal
+import sys
+from PyQt5.QtMultimedia import QSoundEffect
+from PyQt5.QtCore import QUrl, QObject, QSettings, pyqtSignal, QTimer
 
 logger = logging.getLogger('dialog_gui')
 
@@ -13,10 +14,12 @@ class SoundManager(QObject):
         self.settings = QSettings('DialogApp', 'P2PClient')
         self.enabled = self.settings.value('sounds_enabled', True, type=bool)
 
-        self.base_sound_dir = os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            'sounds'
-        )
+        # Определяем базовую папку для ресурсов
+        if getattr(sys, 'frozen', False):
+            base_path = os.path.dirname(sys.executable)
+        else:
+            base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        self.base_sound_dir = os.path.join(base_path, 'sounds')
         logger.info(f"SoundManager: базовая папка для звуков: {self.base_sound_dir}")
 
         self.sounds = {
@@ -26,19 +29,14 @@ class SoundManager(QObject):
             'file_received': self.settings.value('sound_file_received', 'file_received.wav', type=str)
         }
 
-
-        self.player = QMediaPlayer()
-        self.player.error.connect(self._on_player_error)
-        self.loop_player = QMediaPlayer()
-        self.loop_player.error.connect(self._on_loop_player_error)
-        self.loop_player.mediaStatusChanged.connect(self._on_loop_status_changed)
+        # Используем QSoundEffect вместо QMediaPlayer
+        self.player = QSoundEffect()
+        self.player.setVolume(1.0)
+        self.loop_player = QSoundEffect()
+        self.loop_player.setVolume(1.0)
+        # Для зацикливания используем таймер (QSoundEffect может не поддерживать Infinite)
+        self._loop_timer = None
         self._loop_sound_name = None
-
-    def _on_player_error(self, error):
-        logger.error(f"Ошибка QMediaPlayer (обычный): {error} - {self.player.errorString()}")
-
-    def _on_loop_player_error(self, error):
-        logger.error(f"Ошибка QMediaPlayer (зацикленный): {error} - {self.loop_player.errorString()}")
 
     def _resolve_path(self, sound_name):
         filename = self.sounds.get(sound_name)
@@ -46,66 +44,92 @@ class SoundManager(QObject):
             logger.warning(f"Нет имени файла для звука {sound_name}")
             return None
 
-        local_path = os.path.join(self.base_sound_dir, filename)
-        if os.path.exists(local_path):
-            return local_path
-        
-        if os.path.isabs(filename) and os.path.exists(filename):
-            return filename
-        
+        # 1. Сначала ищем рядом с исполняемым файлом
+        exe_dir = os.path.dirname(sys.executable)
+        exe_path = os.path.join(exe_dir, 'sounds', filename)
+        if os.path.exists(exe_path):
+            logger.info(f"Звук найден: {exe_path}")
+            return exe_path
+
+        # 2. Если не нашли – ищем во временной папке (для встроенных звуков)
+        if getattr(sys, 'frozen', False):
+            meipass_path = os.path.join(sys._MEIPASS, 'sounds', filename)
+            if os.path.exists(meipass_path):
+                logger.info(f"Звук найден (MEIPASS): {meipass_path}")
+                return meipass_path
+
+        # 3. Ищем в рабочей директории (запасной вариант)
         cwd_path = os.path.join(os.getcwd(), 'sounds', filename)
         if os.path.exists(cwd_path):
+            logger.info(f"Звук найден (CWD): {cwd_path}")
             return cwd_path
 
-        logger.warning(f"Файл звука не найден: {filename} (искали в {local_path} и {cwd_path})")
+        logger.warning(f"Файл звука не найден: {filename}")
         return None
 
     def _get_sound_url(self, sound_name):
         path = self._resolve_path(sound_name)
         if not path:
             return None
-        return QUrl.fromLocalFile(path)
+        url = QUrl.fromLocalFile(path)
+        if not url.isValid():
+            logger.error(f"Некорректный URL для {path}: {url.errorString()}")
+            return None
+        return url
 
     def play(self, sound_name):
         if not self.enabled:
+            logger.debug("Звуки отключены")
             return
         url = self._get_sound_url(sound_name)
         if url:
-            if self.player.state() == QMediaPlayer.PlayingState:
+            if self.player.isPlaying():
                 self.player.stop()
-            self.player.setMedia(QMediaContent(url))
+            self.player.setSource(url)
             self.player.play()
+            logger.info(f"Воспроизведение звука: {sound_name}")
 
     def play_looped(self, sound_name):
         if not self.enabled:
+            logger.debug("Звуки отключены")
             return
         self.stop_looped()
         url = self._get_sound_url(sound_name)
         if url:
-            self.loop_player.setMedia(QMediaContent(url))
+            self.loop_player.setSource(url)
             self._loop_sound_name = sound_name
             self.loop_player.play()
+            # Запускаем таймер для перезапуска, если звук закончился
+            if self._loop_timer is None:
+                self._loop_timer = QTimer()
+                self._loop_timer.timeout.connect(self._loop_play)
+            # Проверяем каждые 300 мс, не закончился ли звук
+            self._loop_timer.start(300)
+            logger.info(f"Запущен зацикленный звук: {sound_name}")
+
+    def _loop_play(self):
+        # Если зацикленный звук не играет и есть имя – перезапускаем
+        if not self.loop_player.isPlaying() and self._loop_sound_name is not None:
+            url = self._get_sound_url(self._loop_sound_name)
+            if url:
+                self.loop_player.setSource(url)
+                self.loop_player.play()
+                logger.debug(f"Перезапуск зацикленного звука: {self._loop_sound_name}")
+        # Если звук всё ещё играет – ничего не делаем
 
     def stop_looped(self):
-        if self.loop_player.state() == QMediaPlayer.PlayingState:
+        if self.loop_player.isPlaying():
             self.loop_player.stop()
+        if self._loop_timer is not None and self._loop_timer.isActive():
+            self._loop_timer.stop()
         self._loop_sound_name = None
+        logger.info("Зацикленный звук остановлен")
 
     def stop(self):
-        """Остановить всё текущее воспроизведение (и циклы, и одиночные звуки)."""
-        # Останавливаем зацикленное воспроизведение, если активно
         self.stop_looped()
-        # Останавливаем все звуковые потоки device
-        try:
-            if self.player.state() == QMediaPlayer.PlayingState:
-                self.player.stop()
-            logger.info("Воспроизведение остановлено по запросу")
-        except Exception as e:
-            logger.error(f"Ошибка при остановке звука: {e}")
-
-    def _on_loop_status_changed(self, status):
-        if status == QMediaPlayer.EndOfMedia and self._loop_sound_name is not None:
-            self.loop_player.play()
+        if self.player.isPlaying():
+            self.player.stop()
+        logger.info("Все звуки остановлены")
 
     def set_enabled(self, enabled):
         self.enabled = enabled
@@ -118,5 +142,3 @@ class SoundManager(QObject):
         self.sounds[sound_name] = filename
         self.settings.setValue(f'sound_{sound_name}', filename)
         self.settings.sync()
-
-   

@@ -11,6 +11,8 @@ network:
       port: 8888
     - host: "192.168.0.109"
       port: 8888
+    - host: "5.18.190.216"
+      port: 8888
   connection_timeout: 30
   upnp_enabled: false          # Рекомендуется отключить при CGNAT – TURN решит проблему
 

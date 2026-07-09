@@ -7,10 +7,11 @@ from PyQt5.QtGui import QIcon, QPixmap, QPainter
 class NotificationWindow(QWidget):
     """Всплывающее окно уведомления"""
     
-    def __init__(self, title, message, parent=None):
+    def __init__(self, title, message, main_window=None, parent=None):
         super().__init__(parent)
         self.title = title
         self.message = message
+        self.main_window = main_window
         self.init_ui()
         self.setup_animation()
         
@@ -111,5 +112,7 @@ class NotificationWindow(QWidget):
         self.close_animation.start()
         
     def mousePressEvent(self, event):
-        """Закрытие при клике"""
+        """При клике на уведомление показываем главное окно и закрываем уведомление."""
+        if self.main_window and hasattr(self.main_window, 'show_and_activate'):
+            self.main_window.show_and_activate()
         self.close_notification()
