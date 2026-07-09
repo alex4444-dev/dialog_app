@@ -890,19 +890,16 @@ class CallWindow(QWidget):
     def send_audio_data(self, audio_data):
         if self.muted:
             return False
+        # Проверяем флаги до попытки отправки
+        if not self.is_active:
+            return False
+        if not self.call_socket:
+            return False
+        if not self.audio_initialized:
+            return False
+        if self.local_mode:
+            return False
         try:
-            if not self.call_socket:
-                logger.warning("send_audio_data: нет сокета")
-                return False
-            if not self.is_active:
-                logger.warning("send_audio_data: звонок не активен")
-                return False
-            if not self.audio_initialized:
-                logger.warning("send_audio_data: аудио не инициализировано")
-                return False
-            if self.local_mode:
-                logger.warning("send_audio_data: локальный режим")
-                return False
             if isinstance(audio_data, np.ndarray):
                 raw = audio_data.tobytes()
             else:
@@ -928,8 +925,17 @@ class CallWindow(QWidget):
         except socket.timeout:
             logger.warning("⏱️ send_audio_data: таймаут отправки")
             return False
+        except OSError as e:
+            if e.errno == 9:  # Bad file descriptor – сокет закрыт
+                logger.warning("🔌 Попытка отправки в закрытый сокет")
+            else:
+                logger.error(f"Ошибка ОС при отправке аудио: {e}")
+            return False
+        except ConnectionError as e:
+            logger.warning(f"🔌 Ошибка соединения при отправке: {e}")
+            return False
         except Exception as e:
-            logger.error(f"❌ Ошибка отправки аудио: {e}", exc_info=True)
+            logger.error(f"❌ Неожиданная ошибка отправки аудио: {e}", exc_info=True)
             return False
     
     def _audio_receiver_loop(self):
@@ -1036,7 +1042,8 @@ class CallWindow(QWidget):
                 
             if hasattr(self, 'input_stream') and self.input_stream is not None:
                 try:
-                    self.input_stream.stop()
+                    if self.input_stream.active:
+                        self.input_stream.stop()
                     self.input_stream.close()
                 except Exception as e:
                     logger.debug(f"Ошибка остановки input stream: {e}")
@@ -1044,12 +1051,14 @@ class CallWindow(QWidget):
                 
             if hasattr(self, 'output_stream') and self.output_stream is not None:
                 try:
-                    self.output_stream.stop()
+                    if self.output_stream.active:
+                        self.output_stream.stop()
                     self.output_stream.close()
                 except Exception as e:
                     logger.debug(f"Ошибка остановки output stream: {e}")
                 self.output_stream = None
 
+            # Очищаем буферы
             while not self.audio_buffer.empty():
                 try:
                     self.audio_buffer.get_nowait()
@@ -1096,20 +1105,29 @@ class CallWindow(QWidget):
         try:
             if self.sound_manager:
                 self.sound_manager.stop()
+            # Устанавливаем флаги, чтобы остановить любые новые попытки отправки
             self.is_active = False
             self.audio_receiver_running = False   # сигнал остановки потока
             self.duration_timer.stop()
             self.socket_check_timer.stop()
+
+            # Останавливаем аудио-потоки (синхронно)
             self.stop_audio_streams()
 
-            if self.audio_receiver_thread and self.audio_receiver_thread.is_alive():
-                self.audio_receiver_thread.join(timeout=0.5)  # ждём завершения
-
-            if self.call_socket:  
-                try:  
+            # Теперь закрываем сокет и обнуляем ссылку
+            if self.call_socket:
+                try:
                     self.call_socket.close()
                 except:
                     pass
+                self.call_socket = None
+
+
+            # Если поток приёмника ещё жив, ждём его завершения
+            if self.audio_receiver_thread and self.audio_receiver_thread.is_alive():
+                self.audio_receiver_thread.join(timeout=0.5)  # ждём завершения
+
+            
             if not self._closing_by_network and not getattr(self, 'call_ended_emitted', False):
                 self.call_ended.emit(self.call_id)
                 self.call_ended_emitted = True
