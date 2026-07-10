@@ -123,8 +123,8 @@ class VideoCaptureThread(QThread):
         self.stop_capture()
 
 class VideoWidget(QLabel):
-    """Виджет для отображения видео"""
-    
+    """Виджет для отображения видео с сохранением пропорций"""
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setMinimumSize(320, 240)
@@ -139,44 +139,55 @@ class VideoWidget(QLabel):
         """)
         self.setAlignment(Qt.AlignCenter)
         self.setText("Видео не доступно")
-        self.setScaledContents(True)
-        
+        # Убираем setScaledContents – теперь рисуем сами
+        self.current_pixmap = None
+
     def update_frame(self, frame):
-        """Обновить кадр видео"""
+        """Обновить кадр с сохранением пропорций"""
         if frame is not None and len(frame) > 0:
             try:
-                # Проверяем размеры кадра
+                # Конвертация в RGB (как было)
                 if len(frame.shape) == 2:
-                    # Черно-белое изображение - конвертируем в цветное
                     frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2RGB)
                 elif len(frame.shape) == 3:
-                    # Цветное изображение
                     if frame.shape[2] == 4:
-                        # RGBA -> RGB
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2RGB)
                     elif frame.shape[2] == 3:
-                        # BGR -> RGB
                         frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 
                 h, w, ch = frame.shape
                 bytes_per_line = ch * w
-                
-                # Создаем QImage
                 qt_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-                
-                self.setPixmap(QPixmap.fromImage(qt_image))
+                self.current_pixmap = QPixmap.fromImage(qt_image)
+                self.update()  # вызываем перерисовку
                 self.setText("")
-                
             except Exception as e:
                 logger.error(f"Ошибка обновления кадра: {e}")
                 self.setText(f"Ошибка: {str(e)[:50]}")
         else:
+            self.current_pixmap = None
             self.setText("Нет видео")
-            
-    def clear_video(self):
-        """Очистить видео"""
-        self.setText("Видео не доступно")
-        self.clear()
+
+    def paintEvent(self, event):
+        """Рисуем pixmap с сохранением пропорций и центрированием"""
+        if self.current_pixmap is not None:
+            painter = QPainter(self)
+            # Масштабируем с сохранением пропорций
+            scaled = self.current_pixmap.scaled(
+                self.size(),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation
+            )
+            # Центрируем
+            x = (self.width() - scaled.width()) // 2
+            y = (self.height() - scaled.height()) // 2
+            painter.drawPixmap(x, y, scaled)
+        else:
+            super().paintEvent(event)
+
+    def resizeEvent(self, event):
+        self.update()
+        super().resizeEvent(event)
 
 class VideoProcessor:
     """Процессор для обработки видео"""
@@ -404,6 +415,7 @@ class VideoCallWindow(QWidget):
         self.setMaximumSize(1000, 650)
         self.resize(1024, 768)
 
+        self.setWindowFlags(Qt.Window | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, False)
         self.setAutoFillBackground(False)
         
